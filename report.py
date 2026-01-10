@@ -30,6 +30,7 @@ parser.add_argument('--rounding-report', help='Generate report of roundings done
 parser.add_argument('--rounding-report-threshold', help='The number of percent difference required for an amount to be included in the report.', default='1')
 parser.add_argument('--cointracking-usd', help='Use this flag if you have configured cointracking calculate prices in USD. Conversion from USD to SEK will then be done by this script instead.', action='store_true')
 parser.add_argument('--max-overdraft', type=float, help='The maximum overdraft to allow for each coin, at the event of an overdraft the coin balance will be set to zero.', default=1e-9)
+parser.add_argument('--income-report', help='Generate T2 income report for taxable crypto income (Mining, Staking, Interest, etc.)', action='store_true')
 opts = parser.parse_args()
 
 if not os.path.isdir(opts.out):
@@ -69,3 +70,14 @@ elif opts.format == Format.pdf:
     tax.generate_k4_pdf(pages, opts.out)
 
 tax.output_totals(tax_events, stock_tax_events=stock_tax_events)
+
+# Generate income report for T2 form if requested
+if opts.income_report:
+    from_date = datetime.datetime(year=opts.year, month=1, day=1, hour=0, minute=0)
+    to_date = datetime.datetime(year=opts.year, month=12, day=31, hour=23, minute=59)
+    income_total = tax.generate_income_report(
+        trades, from_date, to_date,
+        os.path.join(opts.out, "income_report_t2.csv")
+    )
+    print(f"\nT2 Income Report: {os.path.join(opts.out, 'income_report_t2.csv')}")
+    print(f"  Total taxable crypto income: {round(income_total)} SEK")

@@ -38,6 +38,7 @@ will give you a 10% discount if you decide to buy a Pro or Unlimited account.
 | **Staking** | Staking rewards | Market value when received (taxable income) |
 | **Interest Income** | Interest from lending crypto | Market value when received (taxable income) |
 | **Reward / Bonus** | Platform rewards, referral bonuses | Market value when received (taxable income) |
+| **Income** | Crypto received as payment (salary, freelance) | Market value when received (taxable income) |
 | **Income (non taxable)** | Non-taxable income (e.g., Celsius loans) | Market value when received |
 
 **Note:** For Mining, Staking, and Interest Income, the actual income should also be declared 

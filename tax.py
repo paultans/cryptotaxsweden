@@ -164,6 +164,13 @@ def compute_tax(
                 if buy_coin:
                     buy_coin.buy(trade.buy_amount, trade.buy_value)
 
+            elif trade.type == 'Income':
+                # Crypto received as income (salary, freelance, etc.)
+                # Taxable as income when received, cost basis = market value
+                buy_coin = get_buy_coin(trade)
+                if buy_coin:
+                    buy_coin.buy(trade.buy_amount, trade.buy_value)
+
             elif trade.type == 'Airdrop':
                 # Airdrops typically have zero cost basis (like gifts)
                 buy_coin = get_buy_coin(trade)
@@ -397,3 +404,84 @@ def output_totals(tax_events: List[TaxEvent], stock_tax_events: Optional[List[Ta
     print(f"  Summed profit (box 7.5): {crypto_total_profit}")
     print(f"  Summed loss (box 8.4): {crypto_total_loss}")
     print(f"  Section D Tax: {round(0.3*(crypto_total_profit - 0.7*crypto_total_loss))}")
+
+
+# Trade types that count as taxable income (for T2 form)
+TAXABLE_INCOME_TYPES = [
+    'Mining',
+    'Staking', 
+    'Interest Income',
+    'Reward / Bonus',
+    'Income',
+]
+
+
+def generate_income_report(
+    trades: Any,
+    from_date: Any,
+    to_date: Any,
+    report_filename: str
+) -> float:
+    """Generate a report of taxable crypto income for T2 form.
+    
+    This report summarizes all income-type transactions that need to be
+    declared as hobby income (or business income) on the T2 form.
+    
+    Args:
+        trades: Trades object containing all trades.
+        from_date: Start date for reporting period.
+        to_date: End date for reporting period.
+        report_filename: Path to write the CSV report.
+    
+    Returns:
+        Total taxable income in SEK.
+    """
+    income_events: List[Dict[str, Any]] = []
+    
+    for trade in trades.trades:
+        if trade.date < from_date or trade.date > to_date:
+            continue
+        
+        if trade.type in TAXABLE_INCOME_TYPES:
+            income_events.append({
+                'date': trade.date,
+                'type': trade.type,
+                'coin': trade.buy_coin,
+                'amount': trade.buy_amount,
+                'value_sek': trade.buy_value,
+            })
+    
+    # Sort by date
+    income_events.sort(key=lambda x: x['date'])
+    
+    # Calculate totals per type
+    totals_by_type: Dict[str, float] = {}
+    for event in income_events:
+        trade_type = event['type']
+        if trade_type not in totals_by_type:
+            totals_by_type[trade_type] = 0.0
+        totals_by_type[trade_type] += event['value_sek'] or 0.0
+    
+    total_income = sum(totals_by_type.values())
+    
+    # Write CSV report
+    with open(report_filename, 'w', encoding='utf-8') as f:
+        f.write("# T2 Inkomst av hobby - Kryptovaluta\n")
+        f.write(f"# Period: {from_date.strftime('%Y-%m-%d')} - {to_date.strftime('%Y-%m-%d')}\n")
+        f.write("#\n")
+        f.write("# SAMMANFATTNING:\n")
+        for trade_type, amount in sorted(totals_by_type.items()):
+            f.write(f"# {trade_type}: {round(amount)} SEK\n")
+        f.write(f"# TOTALT: {round(total_income)} SEK\n")
+        f.write("#\n")
+        f.write("Datum,Typ,Valuta,Antal,Värde (SEK)\n")
+        
+        for event in income_events:
+            date_str = event['date'].strftime('%Y-%m-%d')
+            value = round(event['value_sek']) if event['value_sek'] else 0
+            f.write(f"{date_str},{event['type']},{event['coin']},{event['amount']},{value}\n")
+        
+        f.write(f"\n# Total taxable income: {round(total_income)} SEK\n")
+    
+    return total_income
+
