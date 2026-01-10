@@ -89,18 +89,18 @@ Change the example command lines below from `python report.py` to
 
 ### Other (or if you prefer setting up python yourself)
 
-Python 3.6 is required.
+Python 3.10 or higher is required.
 
 The following python packages are needed for pdf generation.
 
 * pdfrw
 * reportlab
 
-Python virtualenv can be setup using
+Python virtual environment can be set up using:
 
-```
-virtualenv venv -p python3.6
-. ./venv/bin/activate
+```bash
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 ```
 
