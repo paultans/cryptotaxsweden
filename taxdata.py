@@ -1,38 +1,63 @@
+"""Data structures and I/O functions for tax data processing.
+
+This module provides classes for handling personal details, trades,
+and tax events, as well as functions for reading exchange rates.
+"""
+
 from datetime import datetime
+from typing import List, Optional, Any
 import dateutil.parser
 import csv
 import json
 
 
 class PersonalDetails:
-    def __init__(self, namn, personnummer, postnummer, postort):
+    """Personal information required for tax forms."""
+    
+    def __init__(self, namn: str, personnummer: str, postnummer: str, postort: str) -> None:
         self.namn = namn
         self.personnummer = personnummer
         self.postnummer = postnummer
         self.postort = postort
 
     @staticmethod
-    def read_from(filename):
+    def read_from(filename: str) -> 'PersonalDetails':
+        """Read personal details from a JSON file."""
         with open(filename, encoding="utf-8-sig") as f:
             d = json.load(f)
             return PersonalDetails(d["namn"], d["personnummer"], d["postnummer"], d["postort"])
 
 
 class Fees:
-    def __init__(self, fees):
+    """Fee configuration for tax calculations."""
+    
+    def __init__(self, fees: dict) -> None:
         self.fees = fees
 
     @staticmethod
-    def read_from(filename):
+    def read_from(filename: str) -> 'Fees':
+        """Read fee configuration from a JSON file."""
         with open(filename, encoding="utf-8-sig") as f:
             d = json.load(f)
             return Fees(d["fees"])
 
 
 class Trade:
-    def __init__(self, lineno, date:datetime, type, group,
-                 buy_coin, buy_amount, buy_value,
-                 sell_coin, sell_amount, sell_value):
+    """Represents a single cryptocurrency trade."""
+    
+    def __init__(
+        self, 
+        lineno: int, 
+        date: datetime, 
+        type: str, 
+        group: Optional[str],
+        buy_coin: Optional[str], 
+        buy_amount: Optional[float], 
+        buy_value: Optional[float],
+        sell_coin: Optional[str], 
+        sell_amount: Optional[float], 
+        sell_value: Optional[float]
+    ) -> None:
         self.lineno = lineno
         self.date = date
         self.type = type
@@ -45,8 +70,13 @@ class Trade:
         self.sell_value = sell_value
 
 
-def read_usdsek_rates():
-    rates = []
+def read_usdsek_rates() -> List[List[Any]]:
+    """Read USD/SEK exchange rates from CSV file.
+    
+    Returns:
+        List of [datetime, float] pairs sorted by date.
+    """
+    rates: List[List[Any]] = []
     with open('data/rates/usdsek.csv', encoding='utf-8-sig') as f:
         is_first = True
         for row in csv.reader(f, delimiter=',', quotechar='"'):
@@ -60,35 +90,55 @@ def read_usdsek_rates():
     return rates
 
 
-def usd_to_sek(rates, wanted_date):
-    prev_date = None
-    prev_price = None
+def usd_to_sek(rates: List[List[Any]], wanted_date: datetime) -> float:
+    """Convert USD to SEK using historical exchange rates.
+    
+    Args:
+        rates: List of [datetime, rate] pairs, sorted by date.
+        wanted_date: The date to look up the rate for.
+    
+    Returns:
+        The exchange rate (SEK per USD) for the given date.
+    
+    Raises:
+        Exception: If no rate is found for the given date.
+    """
+    prev_date: Optional[datetime] = None
+    prev_price: Optional[float] = None
     for rate in rates:
         date = rate[0]
         price = rate[1]
         if prev_date and prev_date <= wanted_date and wanted_date < date:
-            return prev_price
+            return prev_price  # type: ignore
         prev_date = date
         prev_price = price
     raise Exception("Didn't find a USDSEK conversion rate for date %s" % wanted_date)
 
 
 class Trades:
-    def __init__(self, trades):
+    """Collection of trades read from a CSV file."""
+    
+    def __init__(self, trades: List[Trade]) -> None:
         self.trades = trades
 
     @staticmethod
-    def read_from(filename, value_in_usd):
+    def read_from(filename: str, value_in_usd: bool) -> 'Trades':
+        """Read trades from a CoinTracking CSV export.
+        
+        Args:
+            filename: Path to the CSV file.
+            value_in_usd: If True, convert USD values to SEK.
+        """
         with open(filename, encoding='utf-8-sig') as f:
             lines = [line for line in csv.reader(f, delimiter=',', quotechar='"')]
 
         if value_in_usd:
             usdsek = read_usdsek_rates()
 
-        def indices(col_name):
+        def indices(col_name: str) -> List[int]:
             return [index for index, col in enumerate(lines[0]) if col == col_name]
 
-        price_field_name = 'Value in USD' if value_in_usd else 'Value in SEK'
+        price_field_name = 'Value in USD' if value_in_usd else 'Value in SEK'
 
         date_index = indices('Date')[0]
         type_index = indices('Type')[0]
@@ -100,7 +150,7 @@ class Trades:
         sell_amount_index = indices('Sell')[0]
         sell_value_index = indices(price_field_name)[1]
 
-        trades = []
+        trades: List[Trade] = []
         lineno = 2
         for line in lines[1:]:
             trade = Trade(
@@ -131,32 +181,39 @@ class Trades:
 
 
 class TaxEvent:
-    def __init__(self, amount, name:str, income, cost):
+    """Represents a taxable event (sale of assets)."""
+    
+    def __init__(self, amount: float, name: str, income: float, cost: float) -> None:
         self.amount = amount
         self.name = name
         self.income = income
         self.cost = cost
 
     @staticmethod
-    def headers():
+    def headers() -> List[str]:
+        """Return column headers for CSV output."""
         return ['Amount', 'Name', 'Income', 'Cost']
 
-    def fields(self) -> []:
+    def fields(self) -> List[Any]:
+        """Return field values for CSV output."""
         return [self.amount, self.name, self.income, self.cost]
 
-    def k4_fields(self) -> []:
+    def k4_fields(self) -> List[Any]:
+        """Return field values for K4 form output."""
         return [self.amount, self.name, self.income, self.cost,
                 self.profit() if self.profit() > 0 else None,
                 -self.profit() if self.profit() < 0 else None]
 
-    def profit(self):
+    def profit(self) -> float:
+        """Calculate profit (income minus cost)."""
         return self.income - self.cost
 
     @staticmethod
-    def read_stock_tax_events_from(filename:str):
+    def read_stock_tax_events_from(filename: str) -> List['TaxEvent']:
+        """Read stock tax events from a JSON file."""
         with open(filename, encoding="utf-8-sig") as f:
             d = json.load(f)
-            events = []
+            events: List[TaxEvent] = []
             for event in d["trades"]:
                 events.append(TaxEvent(event["amount"], event["name"], event["income"], event["costbase"]))
             return events

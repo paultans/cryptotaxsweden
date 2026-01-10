@@ -1,26 +1,58 @@
-import os
+"""Tax computation functions for Swedish cryptocurrency tax reporting.
 
-from taxdata import TaxEvent, Trade
+This module provides functions for computing capital gains/losses using
+the average cost basis method required by Swedish tax law.
+"""
+
+import os
+from typing import List, Dict, Optional, Tuple, Any
+
+from taxdata import TaxEvent, Trade, Trades, PersonalDetails
 from k4page import K4Section, K4Page
 
 
-def is_fiat(coin):
+def is_fiat(coin: str) -> bool:
+    """Check if a currency is a fiat currency."""
     return coin in ["EUR", "USD", "SEK"]
 
 
 class Coin:
-    def __init__(self, symbol, max_overdraft):
+    """Tracks holdings and cost basis for a single cryptocurrency.
+    
+    Uses the average cost basis method (genomsnittsmetoden) required
+    by Swedish tax law.
+    """
+    
+    def __init__(self, symbol: str, max_overdraft: float) -> None:
         self.symbol = symbol
         self.amount = 0.0
         self.cost_basis = 0.0
         self.max_overdraft = max_overdraft
 
-    def buy(self, amount:float, price:float):
+    def buy(self, amount: float, price: float) -> None:
+        """Add coins and update average cost basis.
+        
+        Args:
+            amount: Number of coins to add.
+            price: Total price paid in SEK.
+        """
         new_amount = self.amount + amount
         self.cost_basis = (self.cost_basis * self.amount + price) / new_amount
         self.amount = new_amount
 
-    def sell(self, amount:float, price:float) -> TaxEvent:
+    def sell(self, amount: float, price: float) -> TaxEvent:
+        """Sell coins and create a tax event.
+        
+        Args:
+            amount: Number of coins to sell.
+            price: Total sale price in SEK.
+            
+        Returns:
+            TaxEvent with the sale details.
+            
+        Raises:
+            Exception: If selling more than owned (beyond max_overdraft).
+        """
         amount_left = self.amount - amount
         if amount_left < -self.max_overdraft:
             raise Exception(f"Not enough coins available for {self.symbol}, {self.amount} < {amount}.")
@@ -34,18 +66,40 @@ class Coin:
         return tax_event
 
 
-def compute_tax(trades, from_date, to_date, max_overdraft, native_currency='SEK', exclude_groups=[], coin_report_filename=None):
-    tax_events = []
-    coins = {}
+def compute_tax(
+    trades: Trades, 
+    from_date: Any, 
+    to_date: Any, 
+    max_overdraft: float, 
+    native_currency: str = 'SEK', 
+    exclude_groups: List[str] = [], 
+    coin_report_filename: Optional[str] = None
+) -> Optional[List[TaxEvent]]:
+    """Compute tax events from trades using average cost basis.
+    
+    Args:
+        trades: Trades object containing all trades.
+        from_date: Start date for tax reporting period.
+        to_date: End date for tax reporting period.
+        max_overdraft: Maximum allowed negative balance per coin.
+        native_currency: Base currency (default: SEK).
+        exclude_groups: Trade groups to exclude.
+        coin_report_filename: If set, write coin report to this file.
+    
+    Returns:
+        List of TaxEvents, or None if error occurred.
+    """
+    tax_events: List[TaxEvent] = []
+    coins: Dict[str, Coin] = {}
 
-    def get_buy_coin(trade:Trade):
+    def get_buy_coin(trade: Trade) -> Optional[Coin]:
         if trade.buy_coin == native_currency:
             return None
         if trade.buy_coin not in coins:
             coins[trade.buy_coin] = Coin(trade.buy_coin, max_overdraft)
         return coins[trade.buy_coin]
 
-    def get_sell_coin(trade:Trade):
+    def get_sell_coin(trade: Trade) -> Optional[Coin]:
         if trade.sell_coin == native_currency:
             return None
         if trade.sell_coin not in coins:
@@ -108,8 +162,12 @@ def compute_tax(trades, from_date, to_date, max_overdraft, native_currency='SEK'
     return tax_events
 
 
-def aggregate_per_coin(tax_events):
-    aggregate_tax_events = {}
+def aggregate_per_coin(tax_events: List[TaxEvent]) -> List[TaxEvent]:
+    """Aggregate tax events by coin, separating profits and losses.
+    
+    Swedish K4 requires profits and losses to be reported separately.
+    """
+    aggregate_tax_events: Dict[str, Tuple[TaxEvent, TaxEvent]] = {}
     for tax_event in tax_events:
         if tax_event.name not in aggregate_tax_events:
             aggregate_tax_events[tax_event.name] = (TaxEvent(0.0, tax_event.name, 0.0, 0.0), TaxEvent(0.0, tax_event.name, 0.0, 0.0))
@@ -125,7 +183,7 @@ def aggregate_per_coin(tax_events):
 
     sorted_aggregate_events = list(aggregate_tax_events.items())
     sorted_aggregate_events.sort()
-    new_tax_events = []
+    new_tax_events: List[TaxEvent] = []
     for (name, (aggregate_profit_tax_event, aggregate_loss_tax_event)) in sorted_aggregate_events:
         if (aggregate_profit_tax_event.amount > 0.0):
             new_tax_events.append(aggregate_profit_tax_event)
@@ -134,7 +192,8 @@ def aggregate_per_coin(tax_events):
     return new_tax_events
 
 
-def rounding_report(tax_events, threshold, report_filename):
+def rounding_report(tax_events: List[TaxEvent], threshold: float, report_filename: str) -> None:
+    """Generate a report of rounding differences for Övriga Upplysningar."""
     with open(report_filename, 'w', encoding='utf-8') as f:
         f.write(f"Decimaler stöds ej för bilaga K4 på skatteverket.se.\n")
         f.write(f"Här är en lista på avrundningar där det avrundade antalet skiljer sig mer än {str(threshold*100)[:4]}% från det egentliga antalet:\n")
@@ -149,19 +208,24 @@ def rounding_report(tax_events, threshold, report_filename):
         raise Exception("Rounding report is longer than 999 characters (the limit on skatteverket.se), consider increasing the threshold --rounding-report-threshold and doing a simplified K4 --simplified-k4.")
 
 
-def convert_to_integer_amounts(tax_events):
-    new_events = []
+def convert_to_integer_amounts(tax_events: List[TaxEvent]) -> List[TaxEvent]:
+    """Convert amounts to integers by rounding."""
+    new_events: List[TaxEvent] = []
     for tax_event in tax_events:
         tax_event.amount = round(tax_event.amount)
         new_events.append(tax_event)
     return new_events
 
 
-def convert_to_integer_amounts_with_prefix(tax_events, precision_loss_tolerance=0.1):
+def convert_to_integer_amounts_with_prefix(
+    tax_events: List[TaxEvent], 
+    precision_loss_tolerance: float = 0.1
+) -> List[TaxEvent]:
+    """Convert amounts to integers, adding prefixes (milli, micro) if needed."""
     prefixes = [("", 1.0), ("milli", 1000.0), ("micro", 1000000.0)]
 
-    # Check which coins need to be modified to not lose to much precision.
-    coin_prefixes = {}
+    # Check which coins need to be modified to not lose too much precision.
+    coin_prefixes: Dict[str, Tuple[str, float]] = {}
     coins = set([x.name for x in tax_events])
     for coin in coins:
         if not is_fiat(coin):
@@ -175,7 +239,7 @@ def convert_to_integer_amounts_with_prefix(tax_events, precision_loss_tolerance=
             coin_prefixes[coin] = (prefix, factor)
 
     # Convert amount to integer
-    new_events = []
+    new_events: List[TaxEvent] = []
     for tax_event in tax_events:
         if tax_event.name in coin_prefixes:
             tax_event.amount = round(coin_prefixes[tax_event.name][1] * tax_event.amount)
@@ -187,8 +251,9 @@ def convert_to_integer_amounts_with_prefix(tax_events, precision_loss_tolerance=
     return new_events
 
 
-def convert_sek_to_integer_amounts(tax_events):
-    new_events = []
+def convert_sek_to_integer_amounts(tax_events: List[TaxEvent]) -> List[TaxEvent]:
+    """Round SEK amounts to integers."""
+    new_events: List[TaxEvent] = []
     for tax_event in tax_events:
         tax_event.income = round(tax_event.income)
         tax_event.cost = round(tax_event.cost)
@@ -196,13 +261,19 @@ def convert_sek_to_integer_amounts(tax_events):
     return new_events
 
 
-def generate_k4_pages(year, personal_details, tax_events, stock_tax_events=None):
-    def generate_section(events):
-        lines = []
+def generate_k4_pages(
+    year: int, 
+    personal_details: PersonalDetails, 
+    tax_events: List[TaxEvent], 
+    stock_tax_events: Optional[List[TaxEvent]] = None
+) -> List[K4Page]:
+    """Generate K4 form pages from tax events."""
+    def generate_section(events: List[TaxEvent]) -> K4Section:
+        lines: List[List[Optional[str]]] = []
         num_sums = [0, 0, 0, 0]
         for event in events:
             k4_fields = event.k4_fields()
-            line = []
+            line: List[Optional[str]] = []
             for (field_index, field) in enumerate(k4_fields):
                 if field_index > 3:
                     line.append(str(field) if field else None)
@@ -217,7 +288,7 @@ def generate_k4_pages(year, personal_details, tax_events, stock_tax_events=None)
     fiat_events = [x for x in tax_events if is_fiat(x.name)]
     crypto_events = [x for x in tax_events if not is_fiat(x.name)]
 
-    pages = []
+    pages: List[K4Page] = []
     page_number = 1
     while True:
         if stock_tax_events:
@@ -237,9 +308,10 @@ def generate_k4_pages(year, personal_details, tax_events, stock_tax_events=None)
     return pages
 
 
-def generate_k4_sru(pages, personal_details, destination_folder):
+def generate_k4_sru(pages: List[K4Page], personal_details: PersonalDetails, destination_folder: str) -> None:
+    """Generate K4 SRU files for digital submission."""
     # Generate info.sru
-    lines = []
+    lines: List[str] = []
     lines.append("#DATABESKRIVNING_START")
     lines.append("#PRODUKT SRU")
     lines.append("#FILNAMN BLANKETTER.SRU")
@@ -267,12 +339,14 @@ def generate_k4_sru(pages, personal_details, destination_folder):
         f.write("\n".join(lines))
 
 
-def generate_k4_pdf(pages, destination_folder):
+def generate_k4_pdf(pages: List[K4Page], destination_folder: str) -> None:
+    """Generate K4 PDF files for printing."""
     for page in pages:
         page.generate_pdf(destination_folder)
 
 
-def output_totals(tax_events, stock_tax_events = None):
+def output_totals(tax_events: List[TaxEvent], stock_tax_events: Optional[List[TaxEvent]] = None) -> None:
+    """Print summary of tax totals."""
     crypto_tax_events = [x for x in tax_events if not is_fiat(x.name)]
     fiat_tax_events = [x for x in tax_events if is_fiat(x.name)]
 
