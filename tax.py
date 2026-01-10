@@ -140,6 +140,36 @@ def compute_tax(
                 if buy_coin:
                     buy_coin.buy(trade.buy_amount, 0.0)
 
+            # Income types - taxable as income in Sweden, cost basis = market value when received
+            elif trade.type == 'Interest Income':
+                buy_coin = get_buy_coin(trade)
+                if buy_coin:
+                    buy_coin.buy(trade.buy_amount, trade.buy_value)
+
+            elif trade.type == 'Staking':
+                # Staking rewards are taxable income in Sweden
+                buy_coin = get_buy_coin(trade)
+                if buy_coin:
+                    buy_coin.buy(trade.buy_amount, trade.buy_value)
+
+            elif trade.type == 'Reward / Bonus':
+                # Rewards are taxable income in Sweden
+                buy_coin = get_buy_coin(trade)
+                if buy_coin:
+                    buy_coin.buy(trade.buy_amount, trade.buy_value)
+
+            elif trade.type == 'Income (non taxable)':
+                # E.g., Celsius loan - still track cost basis at market value
+                buy_coin = get_buy_coin(trade)
+                if buy_coin:
+                    buy_coin.buy(trade.buy_amount, trade.buy_value)
+
+            elif trade.type == 'Airdrop':
+                # Airdrops typically have zero cost basis (like gifts)
+                buy_coin = get_buy_coin(trade)
+                if buy_coin:
+                    buy_coin.buy(trade.buy_amount, 0.0)
+
             elif trade.type == 'Spend':
                 sell_coin = get_sell_coin(trade)
                 if sell_coin:

@@ -26,13 +26,23 @@ will give you a 10% discount if you decide to buy a Pro or Unlimited account.
 
 ## How coins should be entered on [cointracking.info](https://cointracking.info?ref=D611015)
 
-* Trade: Trades fiat->crypto, crypto->crypto and crypto->fiat.
-* Mining (only income): Gets a cost basis of the value at the time the crypto
-was received. The actual income should be declared manually on a
-[T2 form "Inkomst av tjänst för inkomstgivande hobby"](https://www.skatteverket.se/privat/sjalvservice/blanketterbroschyrer/blanketter/info/2051.4.39f16f103821c58f680006232.html).
-* Gift/Tip (only income): Used for reporting hard forks and airdrops, these
-cryptos will get a cost basis of 0.
-* Spend: Used when paying with crypto, treated as a sell of the currency in question.
+### Supported Trade Types
+
+| Type | Description | Cost Basis |
+|------|-------------|------------|
+| **Trade** | Trades fiat↔crypto, crypto↔crypto | Market value at trade time |
+| **Mining** | Mining income | Market value when received (declare as hobby income on T2) |
+| **Gift/Tip** | Hard forks, gifts received | Zero (0 SEK) |
+| **Airdrop** | Free tokens received | Zero (0 SEK) |
+| **Spend** | Paying with crypto | Triggers capital gains tax |
+| **Staking** | Staking rewards | Market value when received (taxable income) |
+| **Interest Income** | Interest from lending crypto | Market value when received (taxable income) |
+| **Reward / Bonus** | Platform rewards, referral bonuses | Market value when received (taxable income) |
+| **Income (non taxable)** | Non-taxable income (e.g., Celsius loans) | Market value when received |
+
+**Note:** For Mining, Staking, and Interest Income, the actual income should also be declared 
+on a [T2 form "Inkomst av tjänst för inkomstgivande hobby"](https://www.skatteverket.se/privat/sjalvservice/blanketterbroschyrer/blanketter/info/2051.4.39f16f103821c58f680006232.html) 
+if it exceeds hobby income thresholds.
 
 A common mistake is to forget to report the conversion to/from Euro which
 the bank does when transfering to an exchange such as Kraken/Bitstamp. There
@@ -42,12 +52,9 @@ are EUR available when later exchanging it to crypto.
 Withdrawals/Deposits are ignored for the tax report as these are assumed to be
 transfers of funds between wallets owned by you.
 
-If you have other types of income in crypto this isn't
-handled by the script yet.
-
-Adding new rules for handling more situations shouln't be that hard as long as
+Adding new rules for handling more situations shouldn't be that hard as long as
 it is easy to define the cost basis for an income and what the price should be
-when selling crypto. You can add feature requests and if it isn't to complicated
+when selling crypto. You can add feature requests and if it isn't too complicated
 I'll try to add it to the script, or you can submit a pull request.
 
 ## Limitations
