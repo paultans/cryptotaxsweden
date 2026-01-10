@@ -16,7 +16,7 @@ class Format(Enum):
         return self.value
 
 parser = argparse.ArgumentParser(description='Swedish cryptocurrency tax reporting script')
-parser.add_argument('year', type=int,
+parser.add_argument('year', type=int, nargs='?', default=None,
                     help='Tax year to create report for')
 parser.add_argument('--trades', help='Read trades from csv file', default='data/trades.csv')
 parser.add_argument('--out', help='Output folder', default='out')
@@ -31,22 +31,70 @@ parser.add_argument('--rounding-report-threshold', help='The number of percent d
 parser.add_argument('--cointracking-usd', help='Use this flag if you have configured cointracking calculate prices in USD. Conversion from USD to SEK will then be done by this script instead.', action='store_true')
 parser.add_argument('--max-overdraft', type=float, help='The maximum overdraft to allow for each coin, at the event of an overdraft the coin balance will be set to zero.', default=1e-9)
 parser.add_argument('--income-report', help='Generate T2 income report for taxable crypto income (Mining, Staking, Interest, etc.)', action='store_true')
+
+# New features
+parser.add_argument('--validate', help='Validate trade data before processing', action='store_true')
+parser.add_argument('--check-transfers', help='Check for unmatched withdrawals/deposits', action='store_true')
+parser.add_argument('--update-rates', help='Update USD/SEK rates from Riksbanken before processing', action='store_true')
+parser.add_argument('--save-state', help='Save coin state at end of year for use in next year', action='store_true')
+parser.add_argument('--load-state', help='Load coin state from file (e.g., out/coin_state_2024.json)', type=str)
+parser.add_argument('--holdings', help='Show current holdings summary after processing', action='store_true')
+
 opts = parser.parse_args()
+
+# Handle update-rates as standalone command
+if opts.update_rates:
+    from rates_updater import update_rates
+    update_rates()
+    if opts.year is None:
+        print("Rates updated. Specify a year to generate a report.")
+        sys.exit(0)
+
+# Year is required for report generation
+if opts.year is None:
+    parser.error("year is required for report generation")
 
 if not os.path.isdir(opts.out):
     os.makedirs(opts.out)
 
-personal_details = PersonalDetails.read_from("data/personal_details.json")
+# Load trades
 trades = Trades.read_from(opts.trades, opts.cointracking_usd)
+
+# Validation
+if opts.validate:
+    from validation import validate_trades, print_validation_report
+    warnings = validate_trades(trades, opts.year)
+    print_validation_report(warnings)
+    errors = [w for w in warnings if w.level == 'error']
+    if errors:
+        print("Fix errors before proceeding.")
+        sys.exit(1)
+
+# Check transfers
+if opts.check_transfers:
+    from transfer_matching import find_unmatched_transfers, print_transfer_report
+    unmatched, stats = find_unmatched_transfers(trades)
+    print_transfer_report(unmatched, stats)
+
+# Load personal details
+personal_details = PersonalDetails.read_from("data/personal_details.json")
 stock_tax_events = TaxEvent.read_stock_tax_events_from("data/stocks.json") if os.path.exists("data/stocks.json") else None
 
+# Compute tax
+from_date = datetime.datetime(year=opts.year, month=1, day=1, hour=0, minute=0)
+to_date = datetime.datetime(year=opts.year, month=12, day=31, hour=23, minute=59)
+
 tax_events = tax.compute_tax(trades,
-                             datetime.datetime(year=opts.year,month=1,day=1,hour=0, minute=0),
-                             datetime.datetime(year=opts.year,month=12,day=31,hour=23, minute=59),
+                             from_date,
+                             to_date,
                              opts.max_overdraft,
                              exclude_groups=opts.exclude_groups if opts.exclude_groups else [],
-                             coin_report_filename=os.path.join(opts.out, "coin_report.csv") if opts.coin_report else None
+                             coin_report_filename=os.path.join(opts.out, "coin_report.csv") if opts.coin_report else None,
+                             load_state_file=opts.load_state,
+                             save_state_file=os.path.join(opts.out, f"coin_state_{opts.year}.json") if opts.save_state else None,
+                             show_holdings=opts.holdings,
                              )
+
 if tax_events is None:
     print(f"Aborting tax computation.")
     sys.exit(1)
@@ -73,11 +121,10 @@ tax.output_totals(tax_events, stock_tax_events=stock_tax_events)
 
 # Generate income report for T2 form if requested
 if opts.income_report:
-    from_date = datetime.datetime(year=opts.year, month=1, day=1, hour=0, minute=0)
-    to_date = datetime.datetime(year=opts.year, month=12, day=31, hour=23, minute=59)
     income_total = tax.generate_income_report(
         trades, from_date, to_date,
         os.path.join(opts.out, "income_report_t2.csv")
     )
     print(f"\nT2 Income Report: {os.path.join(opts.out, 'income_report_t2.csv')}")
     print(f"  Total taxable crypto income: {round(income_total)} SEK")
+

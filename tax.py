@@ -73,7 +73,10 @@ def compute_tax(
     max_overdraft: float, 
     native_currency: str = 'SEK', 
     exclude_groups: List[str] = [], 
-    coin_report_filename: Optional[str] = None
+    coin_report_filename: Optional[str] = None,
+    load_state_file: Optional[str] = None,
+    save_state_file: Optional[str] = None,
+    show_holdings: bool = False
 ) -> Optional[List[TaxEvent]]:
     """Compute tax events from trades using average cost basis.
     
@@ -85,12 +88,26 @@ def compute_tax(
         native_currency: Base currency (default: SEK).
         exclude_groups: Trade groups to exclude.
         coin_report_filename: If set, write coin report to this file.
+        load_state_file: If set, load initial coin state from this file.
+        save_state_file: If set, save final coin state to this file.
+        show_holdings: If True, print holdings summary after processing.
     
     Returns:
         List of TaxEvents, or None if error occurred.
     """
     tax_events: List[TaxEvent] = []
     coins: Dict[str, Coin] = {}
+    
+    # Load initial state if provided
+    if load_state_file:
+        from coin_state import CoinState
+        state = CoinState.load(load_state_file)
+        for symbol, data in state.coins.items():
+            coin = Coin(symbol, max_overdraft)
+            coin.amount = data['amount']
+            coin.cost_basis = data['cost_basis']
+            coins[symbol] = coin
+        print(f"Loaded state from {state.as_of_date}: {len(state.coins)} coins")
 
     def get_buy_coin(trade: Trade) -> Optional[Coin]:
         if trade.buy_coin == native_currency:
@@ -195,6 +212,33 @@ def compute_tax(
             coin_list.sort(key=lambda coin: coin.symbol)
             for coin in coin_list:
                 f.write(f"{str(coin.amount)[:12].ljust(14)}{str(coin.symbol).ljust(8)}{str(coin.cost_basis)[:8].ljust(10)}\n")
+
+    # Save state if requested
+    if save_state_file:
+        from coin_state import CoinState
+        state = CoinState()
+        state.year = to_date.year
+        state.as_of_date = to_date.strftime('%Y-%m-%d')
+        for symbol, coin in coins.items():
+            if coin.amount > 1e-9:
+                state.add_coin(symbol, coin.amount, coin.cost_basis)
+        state.save(save_state_file)
+    
+    # Show holdings summary if requested
+    if show_holdings:
+        print("\n" + "=" * 60)
+        print("Holdings Summary (as of end of year)")
+        print("=" * 60)
+        total_cost = 0.0
+        coin_list = [(s, c) for s, c in coins.items() if c.amount > 1e-9]
+        coin_list.sort(key=lambda x: x[0])
+        for symbol, coin in coin_list:
+            cost = coin.amount * coin.cost_basis
+            total_cost += cost
+            print(f"  {symbol:8} {coin.amount:>14.6f} @ {coin.cost_basis:>10.2f} = {cost:>12,.0f} SEK")
+        print("-" * 60)
+        print(f"  Total cost basis: {total_cost:,.0f} SEK")
+        print("=" * 60)
 
     return tax_events
 
