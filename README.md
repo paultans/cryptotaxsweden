@@ -95,6 +95,27 @@ There is a packaged version for macOS under releases which can be used.
 Change the example command lines below from `python report.py` to
 `./report` instead if using it.
 
+### Streamlit Web UI (New!)
+
+A web-based user interface is now available for easier usage:
+
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Run the web UI
+streamlit run app.py
+```
+
+Then open http://localhost:8501 in your browser.
+
+**Features:**
+- Upload trades directly from browser
+- Data validation with helpful warnings
+- Withdrawal/deposit matching
+- Download SRU files and rounding report
+- Holdings summary view
+
 ### Other (or if you prefer setting up python yourself)
 
 Python 3.10 or higher is required.

@@ -10,3 +10,4 @@ data/trades*.csv*
 data/fees.json
 data/stocks.json
 .python-version
+venv311/

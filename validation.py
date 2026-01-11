@@ -133,31 +133,84 @@ def _check_date_gaps(trades: Any, year: Optional[int] = None) -> List[Validation
     return warnings
 
 
-def _check_balance_issues(trades: Any) -> List[ValidationWarning]:
-    """Check for trades that might cause negative balances."""
+def _check_balance_issues(trades: Any, sek_threshold: float = 2500.0) -> List[ValidationWarning]:
+    """Check for trades that might cause negative balances.
+    
+    Uses monetary value (SEK) to determine significance of overdrafts.
+    Only reports errors for overdrafts exceeding sek_threshold.
+    
+    Args:
+        trades: Trades object containing all trades
+        sek_threshold: Minimum SEK value to report as error (default: 2500)
+    """
     warnings = []
     
-    # Track running balances
+    # Track running balances, prices, and first negative per coin
     balances: Dict[str, float] = defaultdict(float)
+    prices: Dict[str, float] = {}  # Last known price per unit in SEK
+    first_negative: Dict[str, Tuple[int, float, float]] = {}  # coin -> (lineno, balance, price)
     
-    sorted_trades = sorted(trades.trades, key=lambda t: t.date)
+    # Sort by date, with secondary sort to prioritize deposits/buys over withdrawals/sells
+    # This handles same-timestamp trades correctly
+    def sort_key(trade):
+        # Lower number = processed first
+        type_order = {
+            'Deposit': 0,
+            'Mining': 0,
+            'Staking': 0,
+            'Interest Income': 0,
+            'Reward / Bonus': 0,
+            'Income': 0,
+            'Income (non taxable)': 0,
+            'Airdrop': 0,
+            'Gift/Tip': 0,
+            'Trade': 1,  # Trades can be either buy or sell
+            'Spend': 2,
+            'Withdrawal': 2,
+        }
+        return (trade.date, type_order.get(trade.type, 1))
+    
+    sorted_trades = sorted(trades.trades, key=sort_key)
     
     for trade in sorted_trades:
-        # Add buys
+        # Track buy prices
         if trade.buy_coin and trade.buy_coin not in ['SEK', 'EUR', 'USD']:
             balances[trade.buy_coin] += trade.buy_amount or 0
+            if trade.buy_amount and trade.buy_value:
+                prices[trade.buy_coin] = trade.buy_value / trade.buy_amount
         
-        # Subtract sells
+        # Track sell prices and check for negative
         if trade.sell_coin and trade.sell_coin not in ['SEK', 'EUR', 'USD']:
+            if trade.sell_amount and trade.sell_value:
+                prices[trade.sell_coin] = trade.sell_value / trade.sell_amount
+            
             balances[trade.sell_coin] -= trade.sell_amount or 0
             
-            # Check for negative balance
-            if balances[trade.sell_coin] < -0.0001:
-                warnings.append(ValidationWarning(
-                    'error',
-                    f"Negative balance: {trade.sell_coin} goes to {balances[trade.sell_coin]:.6f} after selling {trade.sell_amount}",
-                    trade.lineno
-                ))
+            # Track first time coin goes significantly negative
+            if balances[trade.sell_coin] < -1e-8:
+                if trade.sell_coin not in first_negative:
+                    price = prices.get(trade.sell_coin, 0)
+                    first_negative[trade.sell_coin] = (trade.lineno, balances[trade.sell_coin], price)
+    
+    # Create warnings based on SEK value
+    for coin, (lineno, balance, price) in first_negative.items():
+        sek_value = abs(balance * price) if price else 0
+        
+        if sek_value >= sek_threshold:
+            # Significant overdraft - this needs attention
+            warnings.append(ValidationWarning(
+                'error',
+                f"Negative balance: {coin} at {balance:.6f} units (~{sek_value:,.0f} SEK)",
+                lineno
+            ))
+        elif sek_value >= 100:
+            # Minor but noticeable
+            warnings.append(ValidationWarning(
+                'warning',
+                f"Minor overdraft: {coin} at {balance:.6f} units (~{sek_value:,.0f} SEK)",
+                lineno
+            ))
+        # Ignore very small overdrafts (< 100 SEK)
     
     return warnings
 

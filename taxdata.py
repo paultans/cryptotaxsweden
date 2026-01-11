@@ -132,6 +132,9 @@ class Trades:
         with open(filename, encoding='utf-8-sig') as f:
             lines = [line for line in csv.reader(f, delimiter=',', quotechar='"')]
 
+        # Normalize headers: replace non-breaking spaces with regular spaces
+        lines[0] = [col.replace('\xa0', ' ') for col in lines[0]]
+
         if value_in_usd:
             usdsek = read_usdsek_rates()
 

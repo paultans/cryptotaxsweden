@@ -53,8 +53,10 @@ show_holdings = st.sidebar.checkbox("Show Holdings Summary", value=True)
 
 # Advanced options
 with st.sidebar.expander("Advanced Options"):
-    max_overdraft = st.number_input("Max Overdraft", value=0.000001, format="%.6f")
+    max_overdraft = st.number_input("Max Overdraft", value=0.00000001, format="%.8f")
     output_format = st.selectbox("Output Format", ["SRU", "PDF"])
+    generate_rounding_report = st.checkbox("Generate Rounding Report", value=True)
+    rounding_threshold = st.slider("Rounding Threshold %", min_value=1, max_value=10, value=1)
 
 # Main content area
 if trades_file is None:
@@ -82,7 +84,9 @@ else:
         trades = Trades.read_from(trades_path, use_usd)
         st.success(f"✅ Loaded {len(trades.trades)} trades")
     except Exception as e:
+        import traceback
         st.error(f"❌ Error loading trades: {e}")
+        st.code(traceback.format_exc())
         st.stop()
     
     # Tabs for different views
@@ -151,102 +155,119 @@ else:
     with tab3:
         st.header("Generate Report")
         
-        # Check if we can proceed
+        # Show validation status but don't block
         errors = [w for w in validate_trades(trades, year) if w.level == 'error']
         
         if errors:
-            st.error(f"❌ Fix {len(errors)} validation errors before generating report")
-        else:
-            # Personal details
-            st.subheader("Personal Details")
-            
-            col1, col2 = st.columns(2)
-            name = col1.text_input("Name", value="")
-            personnummer = col2.text_input("Personnummer", value="", placeholder="YYYYMMDD-XXXX")
-            
-            col3, col4 = st.columns(2)
-            postnummer = col3.text_input("Postnummer", value="")
-            postort = col4.text_input("Postort", value="")
-            
-            if st.button("🚀 Generate Report", type="primary"):
-                if not all([name, personnummer, postnummer, postort]):
-                    st.error("Please fill in all personal details")
-                else:
-                    with st.spinner("Generating report..."):
-                        # Create personal details
-                        personal = PersonalDetails(name, personnummer, postnummer, postort)
+            st.warning(f"⚠️ {len(errors)} validation warnings found (see Validation tab). You can still generate the report - the tool handles small overdrafts automatically.")
+        
+        # Personal details - always show
+        st.subheader("Personal Details")
+        
+        col1, col2 = st.columns(2)
+        name = col1.text_input("Name", value="")
+        personnummer = col2.text_input("Personnummer", value="", placeholder="YYYYMMDD-XXXX")
+        
+        col3, col4 = st.columns(2)
+        postnummer = col3.text_input("Postnummer", value="")
+        postort = col4.text_input("Postort", value="")
+        
+        if st.button("🚀 Generate Report", type="primary"):
+            if not all([name, personnummer, postnummer, postort]):
+                st.error("Please fill in all personal details")
+            else:
+                with st.spinner("Generating report..."):
+                    # Create personal details
+                    personal = PersonalDetails(name, personnummer, postnummer, postort)
+                    
+                    # Compute tax
+                    from_date = datetime.datetime(year=year, month=1, day=1)
+                    to_date = datetime.datetime(year=year, month=12, day=31, hour=23, minute=59)
+                    
+                    tax_events = tax.compute_tax(
+                        trades, from_date, to_date, max_overdraft,
+                        exclude_groups=[]
+                    )
+                    
+                    if tax_events is None:
+                        st.error("Error computing tax events")
+                    else:
+                        if simplified_k4:
+                            tax_events = tax.aggregate_per_coin(tax_events)
                         
-                        # Compute tax
-                        from_date = datetime.datetime(year=year, month=1, day=1)
-                        to_date = datetime.datetime(year=year, month=12, day=31, hour=23, minute=59)
+                        # Prepare output directory
+                        output_dir = "out/streamlit"
+                        os.makedirs(output_dir, exist_ok=True)
                         
-                        tax_events = tax.compute_tax(
-                            trades, from_date, to_date, max_overdraft,
-                            exclude_groups=[]
-                        )
-                        
-                        if tax_events is None:
-                            st.error("Error computing tax events")
+                        # Convert to integers for SRU and generate rounding report
+                        if output_format == "SRU":
+                            if generate_rounding_report:
+                                threshold = rounding_threshold / 100.0
+                                rounding_file = f"{output_dir}/rounding_report.txt"
+                                tax.rounding_report(tax_events, threshold, rounding_file)
+                            display_events = tax.convert_to_integer_amounts(tax_events.copy())
                         else:
-                            if simplified_k4:
-                                tax_events = tax.aggregate_per_coin(tax_events)
+                            display_events = tax_events
+                        
+                        display_events = tax.convert_sek_to_integer_amounts(display_events)
+                        
+                        # Generate pages
+                        pages = tax.generate_k4_pages(year, personal, display_events)
+                        
+                        if output_format == "SRU":
+                            tax.generate_k4_sru(pages, personal, output_dir)
                             
-                            # Convert to integers for SRU
-                            if output_format == "SRU":
-                                display_events = tax.convert_to_integer_amounts(tax_events.copy())
-                            else:
-                                display_events = tax_events
+                            # Read generated files
+                            with open(f"{output_dir}/info.sru", "r", encoding="iso-8859-1") as f:
+                                info_sru = f.read()
+                            with open(f"{output_dir}/blanketter.sru", "r", encoding="iso-8859-1") as f:
+                                blanketter_sru = f.read()
                             
-                            display_events = tax.convert_sek_to_integer_amounts(display_events)
-                            
-                            # Generate pages
-                            pages = tax.generate_k4_pages(year, personal, display_events)
-                            
-                            # Generate output files
-                            output_dir = "out/streamlit"
-                            os.makedirs(output_dir, exist_ok=True)
-                            
-                            if output_format == "SRU":
-                                tax.generate_k4_sru(pages, personal, output_dir)
-                                
-                                # Read generated files
-                                with open(f"{output_dir}/info.sru", "r") as f:
-                                    info_sru = f.read()
-                                with open(f"{output_dir}/blanketter.sru", "r") as f:
-                                    blanketter_sru = f.read()
-                                
-                                st.success("✅ SRU files generated!")
-                                
-                                col1, col2 = st.columns(2)
-                                with col1:
-                                    st.download_button(
-                                        "📥 Download info.sru",
-                                        info_sru,
-                                        file_name="info.sru",
-                                        mime="text/plain"
-                                    )
-                                with col2:
-                                    st.download_button(
-                                        "📥 Download blanketter.sru",
-                                        blanketter_sru,
-                                        file_name="blanketter.sru",
-                                        mime="text/plain"
-                                    )
-                            else:
-                                tax.generate_k4_pdf(pages, output_dir)
-                                st.success("✅ PDF files generated in out/streamlit/")
-                            
-                            # Show totals
-                            st.subheader("Tax Summary")
-                            crypto_events = [x for x in display_events if not tax.is_fiat(x.name)]
-                            
-                            profit = sum([x.profit() if x.profit() > 0 else 0 for x in crypto_events])
-                            loss = sum([-x.profit() if x.profit() < 0 else 0 for x in crypto_events])
+                            st.success("✅ SRU files generated!")
                             
                             col1, col2, col3 = st.columns(3)
-                            col1.metric("Total Profit", f"{profit:,.0f} SEK")
-                            col2.metric("Total Loss", f"{loss:,.0f} SEK")
-                            col3.metric("Estimated Tax", f"{round(0.3*(profit - 0.7*loss)):,.0f} SEK")
+                            with col1:
+                                st.download_button(
+                                    "📥 Download info.sru",
+                                    info_sru,
+                                    file_name="info.sru",
+                                    mime="text/plain"
+                                )
+                            with col2:
+                                st.download_button(
+                                    "📥 Download blanketter.sru",
+                                    blanketter_sru,
+                                    file_name="blanketter.sru",
+                                    mime="text/plain"
+                                )
+                            # Rounding report download
+                            if generate_rounding_report:
+                                rounding_file = f"{output_dir}/rounding_report.txt"
+                                if os.path.exists(rounding_file):
+                                    with open(rounding_file, "r") as f:
+                                        rounding_text = f.read()
+                                    with col3:
+                                        st.download_button(
+                                            "📥 Rounding Report",
+                                            rounding_text,
+                                            file_name="rounding_report.txt",
+                                            mime="text/plain"
+                                        )
+                        else:
+                            tax.generate_k4_pdf(pages, output_dir)
+                            st.success("✅ PDF files generated in out/streamlit/")
+                        
+                        # Show totals
+                        st.subheader("Tax Summary")
+                        crypto_events = [x for x in display_events if not tax.is_fiat(x.name)]
+                        
+                        profit = sum([x.profit() if x.profit() > 0 else 0 for x in crypto_events])
+                        loss = sum([-x.profit() if x.profit() < 0 else 0 for x in crypto_events])
+                        
+                        col1, col2, col3 = st.columns(3)
+                        col1.metric("Total Profit", f"{profit:,.0f} SEK")
+                        col2.metric("Total Loss", f"{loss:,.0f} SEK")
+                        col3.metric("Estimated Tax", f"{round(0.3*(profit - 0.7*loss)):,.0f} SEK")
     
     with tab4:
         st.header("Holdings Summary")
