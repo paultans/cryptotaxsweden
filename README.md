@@ -115,6 +115,9 @@ Then open http://localhost:8501 in your browser.
 - Withdrawal/deposit matching
 - Download SRU files and rounding report
 - Holdings summary view
+- Profit/Loss breakdown by coin
+- T2 hobby income report (staking, mining, etc.)
+- Calculation report showing cost basis changes per trade
 
 ### Other (or if you prefer setting up python yourself)
 
@@ -170,7 +173,9 @@ usage: report.py [-h] [--trades TRADES] [--out OUT] [--format {pdf,sru}]
                  [--exclude-groups [EXCLUDE_GROUPS [EXCLUDE_GROUPS ...]]]
                  [--coin-report] [--simplified-k4] [--rounding-report]
                  [--rounding-report-threshold ROUNDING_REPORT_THRESHOLD]
-                 [--cointracking-usd]
+                 [--cointracking-usd] [--max-overdraft MAX_OVERDRAFT]
+                 [--income-report] [--t2-sru] [--calculation-report]
+                 [--validate] [--check-transfers] [--holdings]
                  year
 
 Swedish cryptocurrency tax reporting script
@@ -204,6 +209,20 @@ optional arguments:
                         The maximum overdraft to allow for each coin, at the
                         event of an overdraft the coin balance will be set to
                         zero.
+  --income-report       Generate T2 income report CSV for taxable crypto
+                        income (Mining, Staking, Interest, etc.)
+  --t2-sru              Generate T2 SRU file for electronic submission to
+                        Skatteverket (hobby income form)
+  --t2-expenses N       Total expenses (kontanta utgifter) for T2 form in SEK
+  --t2-schablon PCT     Schablonavdrag percentage (0.25 for born 1959+, 0.10 older)
+  --calculation-report  Generate detailed calculation report showing cost
+                        basis changes per trade (CSV format)
+  --validate            Validate trade data before processing
+  --check-transfers     Check for unmatched withdrawals/deposits
+  --holdings            Show current holdings summary after processing
+  --save-state          Save coin state at end of year for use in next year
+  --load-state FILE     Load coin state from file (e.g., out/coin_state_2024.json)
+  --update-rates        Update USD/SEK rates from Riksbanken before processing
 ```
 
 ### Example
@@ -235,6 +254,73 @@ python report.py --format=pdf 2017
 ```
 
 Generated pdf files can be found in the ```out``` folder.
+
+#### Generate calculation report showing cost basis changes
+
+The calculation report shows how each trade affects your cost basis, useful for
+understanding and verifying the tax calculation.
+
+```
+python report.py 2024 --simplified-k4 --calculation-report
+```
+
+This generates:
+- `out/calculation_report.csv` - All trades with cost basis changes
+- `out/calculation_report_{COIN}.csv` - Per-coin breakdown
+
+The report includes columns (in Swedish): Datum, Symbol, Typ, Händelse (Köp/Sälj),
+Antal, Pris, Totalt antal, Totalt omkostnadsbelopp, Genomsnittligt omkostnadsbelopp,
+Vinst, Förlust.
+
+#### Generate T2 hobby income report
+
+If you have crypto income from mining, staking, interest, etc., this needs to be
+reported on a T2 form as hobby income.
+
+```
+# Generate CSV report only
+python report.py 2024 --income-report
+
+# Generate SRU file for upload to Skatteverket (appended to K4 blanketter.sru)
+python report.py 2024 --simplified-k4 --t2-sru
+
+# With expenses deduction
+python report.py 2024 --simplified-k4 --t2-sru --t2-expenses 5000
+```
+
+The T2 SRU file is appended to `blanketter.sru` so you can upload both K4 and T2
+in a single file to Skatteverket's filöverföring.
+
+#### Validate trades and check for issues
+
+```
+python report.py 2024 --validate --check-transfers
+```
+
+This checks for common issues like missing cost basis, negative balances, and
+unmatched withdrawal/deposit pairs.
+
+#### Save and load coin state between years
+
+To continue from the previous year's holdings without reprocessing all history:
+
+```
+# Generate 2023 report and save state
+python report.py 2023 --simplified-k4 --save-state
+
+# Generate 2024 report loading 2023 state
+python report.py 2024 --simplified-k4 --load-state out/coin_state_2023.json
+```
+
+#### Update exchange rates
+
+```
+# Update rates and generate report
+python report.py 2024 --update-rates --simplified-k4
+
+# Update rates only (no report)
+python report.py --update-rates
+```
 
 #### Merging the generated pdf files
 
