@@ -9,6 +9,7 @@ from typing import List, Dict, Optional, Tuple, Any
 
 from taxdata import TaxEvent, Trade, Trades, PersonalDetails
 from k4page import K4Section, K4Page
+from t2page import T2Data, T2Page, generate_t2_sru
 
 
 def is_fiat(coin: str) -> bool:
@@ -528,4 +529,87 @@ def generate_income_report(
         f.write(f"\n# Total taxable income: {round(total_income)} SEK\n")
     
     return total_income
+
+
+def generate_t2_sru_report(
+    trades: Any,
+    from_date: Any,
+    to_date: Any,
+    personal_details: PersonalDetails,
+    destination_folder: str,
+    expenses: int = 0,
+    depreciation: int = 0,
+    previous_deficit: int = 0,
+    deficit_years: Optional[List[int]] = None,
+    previous_schablonavdrag: int = 0,
+    assessed_egenavgifter: int = 0,
+    schablon_percent: float = 0.25,
+    activity_description: str = "Kryptovaluta - hobby (staking, mining m.m.)",
+    append_to_k4: bool = True
+) -> Tuple[int, int]:
+    """Generate T2 SRU file for hobby income (staking, mining, etc.).
+
+    This creates SRU-formatted output for the T2 form that can be uploaded
+    to Skatteverket's filöverföring service.
+
+    Args:
+        trades: Trades object containing all trades.
+        from_date: Start date for reporting period.
+        to_date: End date for reporting period.
+        personal_details: PersonalDetails with taxpayer info.
+        destination_folder: Directory to write SRU files.
+        expenses: Total cash expenses (kontanta utgifter) in SEK.
+        depreciation: Depreciation deduction (förslitningsavdrag) in SEK.
+        previous_deficit: Deficit from previous years to deduct (max 5 years back).
+        deficit_years: List of years (2020-2024) the deficit is from.
+        previous_schablonavdrag: Previous year's standard deduction for egenavgifter.
+        assessed_egenavgifter: Assessed egenavgifter from slutskattebesked.
+        schablon_percent: Standard deduction percentage (0.25 for born 1959+, 0.10 for older).
+        activity_description: Description for Section A (max ~50 chars).
+        append_to_k4: If True, append T2 to existing blanketter.sru (after K4).
+
+    Returns:
+        Tuple of (total_income, final_result_overskott) in SEK.
+
+    Note:
+        The SRU field codes used are based on SKV 269 documentation.
+        Test with Skatteverket's test function before production submission.
+    """
+    # Calculate total income from trades
+    total_income = 0.0
+
+    for trade in trades.trades:
+        if trade.date < from_date or trade.date > to_date:
+            continue
+
+        if trade.type in TAXABLE_INCOME_TYPES:
+            total_income += trade.buy_value or 0.0
+
+    # Round to whole kronor
+    income_sek = round(total_income)
+
+    if income_sek == 0:
+        return (0, 0)
+
+    # Create T2 data
+    t2_data = T2Data(
+        verksamhet_art=activity_description,
+        inkomster=income_sek,
+        kontanta_utgifter=expenses,
+        forslitningsavdrag=depreciation,
+        tidigare_underskott=previous_deficit,
+        underskott_years=deficit_years or [],
+        foregaende_schablonavdrag=previous_schablonavdrag,
+        paforda_egenavgifter=assessed_egenavgifter,
+        schablon_percent=schablon_percent
+    )
+
+    # Create T2 page
+    year = from_date.year
+    t2_page = T2Page(year, personal_details, 1, t2_data)
+
+    # Generate SRU
+    generate_t2_sru([t2_page], personal_details, destination_folder, append_to_k4)
+
+    return (income_sek, t2_data.d6_overskott)
 

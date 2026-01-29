@@ -48,7 +48,9 @@ trades_file = st.sidebar.file_uploader("Trades CSV (from CoinTracking)", type=['
 st.sidebar.header("📋 Options")
 use_usd = st.sidebar.checkbox("CoinTracking prices in USD", value=False)
 simplified_k4 = st.sidebar.checkbox("Simplified K4 (aggregate per coin)", value=True)
-generate_income_report = st.sidebar.checkbox("Generate T2 Income Report", value=True)
+generate_income_report = st.sidebar.checkbox("Generate T2 Income Report (CSV)", value=True)
+generate_t2_sru = st.sidebar.checkbox("Generate T2 SRU (for upload)", value=False,
+                                       help="Generate SRU file for T2 hobby income form")
 show_holdings = st.sidebar.checkbox("Show Holdings Summary", value=True)
 
 # Advanced options
@@ -90,7 +92,7 @@ else:
         st.stop()
     
     # Tabs for different views
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Validation", "🔄 Transfers", "📄 Generate Report", "📈 Holdings", "💰 Profit/Loss"])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 Validation", "🔄 Transfers", "📄 Generate Report", "📈 Holdings", "💰 Profit/Loss", "📋 T2 Income"])
     
     with tab1:
         st.header("Trade Data Validation")
@@ -268,10 +270,29 @@ else:
                                 with open(income_file, "r", encoding="utf-8") as f:
                                     income_text = f.read()
                                 st.download_button(
-                                    "📥 Download T2 Income Report",
+                                    "📥 Download T2 Income Report (CSV)",
                                     income_text,
                                     file_name="income_report.csv",
                                     mime="text/csv"
+                                )
+
+                        # Generate T2 SRU if requested
+                        if generate_t2_sru:
+                            t2_income, t2_result = tax.generate_t2_sru_report(
+                                trades, from_date, to_date, personal, output_dir,
+                                append_to_k4=True
+                            )
+                            if t2_income > 0:
+                                st.success(f"✅ T2 SRU generated! Income: {t2_income:,} SEK, Result (to INK1): {t2_result:,} SEK")
+                                # Re-read the updated blanketter.sru
+                                with open(f"{output_dir}/blanketter.sru", "r", encoding="iso-8859-1") as f:
+                                    blanketter_sru = f.read()
+                                st.download_button(
+                                    "📥 Download blanketter.sru (K4+T2)",
+                                    blanketter_sru,
+                                    file_name="blanketter.sru",
+                                    mime="text/plain",
+                                    key="blanketter_with_t2"
                                 )
 
                         # Show totals
@@ -428,6 +449,88 @@ else:
                         'Cost (SEK)': round(data['cost'])
                     })
                 st.dataframe(pd.DataFrame(all_data), use_container_width=True)
+
+    with tab6:
+        st.header("T2 Hobby Income (Staking, Mining, etc.)")
+        st.markdown("""
+        This tab shows your taxable crypto income that should be reported on **T2 form**
+        (Inkomst av tjänst - hobby). This includes:
+        - Mining rewards
+        - Staking rewards
+        - Interest income
+        - Other crypto rewards/bonuses
+        """)
+
+        from_date = datetime.datetime(year=year, month=1, day=1)
+        to_date = datetime.datetime(year=year, month=12, day=31, hour=23, minute=59)
+
+        # Calculate income by type
+        income_by_type = {}
+        income_events = []
+
+        for trade in trades.trades:
+            if trade.date < from_date or trade.date > to_date:
+                continue
+            if trade.type in tax.TAXABLE_INCOME_TYPES:
+                if trade.type not in income_by_type:
+                    income_by_type[trade.type] = 0.0
+                income_by_type[trade.type] += trade.buy_value or 0.0
+                income_events.append({
+                    'Date': trade.date.strftime('%Y-%m-%d'),
+                    'Type': trade.type,
+                    'Coin': trade.buy_coin,
+                    'Amount': trade.buy_amount,
+                    'Value (SEK)': round(trade.buy_value or 0)
+                })
+
+        total_income = sum(income_by_type.values())
+
+        if total_income > 0:
+            # Summary metrics
+            st.subheader("Income Summary")
+            cols = st.columns(min(len(income_by_type) + 1, 4))
+            cols[0].metric("Total Income", f"{round(total_income):,} SEK")
+            for i, (income_type, amount) in enumerate(sorted(income_by_type.items())):
+                if i + 1 < len(cols):
+                    cols[i + 1].metric(income_type, f"{round(amount):,} SEK")
+
+            # Detailed breakdown
+            st.subheader("Income Events")
+            if income_events:
+                df = pd.DataFrame(income_events)
+                st.dataframe(df, use_container_width=True)
+
+            # T2 calculation preview
+            st.subheader("T2 Form Preview")
+            st.markdown("**Section B - Årets inkomster och utgifter**")
+
+            # Simple calculation (no expenses for crypto hobby typically)
+            b1_income = round(total_income)
+            b4_surplus = b1_income  # Assuming no expenses
+
+            col1, col2 = st.columns(2)
+            col1.metric("B.1 Inkomster", f"{b1_income:,} SEK")
+            col2.metric("B.4 Överskott", f"{b4_surplus:,} SEK")
+
+            st.markdown("**Section D - Egenavgifter**")
+            # Default 25% schablonavdrag for born 1959 or later
+            d5_schablon = round(b4_surplus * 0.25)
+            d6_result = b4_surplus - d5_schablon
+
+            col1, col2, col3 = st.columns(3)
+            col1.metric("D.1 Överskott", f"{b4_surplus:,} SEK")
+            col2.metric("D.5 Schablonavdrag (25%)", f"{d5_schablon:,} SEK")
+            col3.metric("D.6 Resultat → INK1 p.1.6", f"{d6_result:,} SEK")
+
+            st.info("""
+            **Note:** The D.6 result is what you report on your main tax form (INK1) at point 1.6.
+            You'll also pay egenavgifter on this income (around 28.97% for most people).
+
+            To generate the T2 SRU file for upload to Skatteverket, enable "Generate T2 SRU"
+            in the sidebar and click "Generate Report" on the Generate Report tab.
+            """)
+        else:
+            st.info("No taxable crypto income found for this year.")
 
 # Footer
 st.sidebar.markdown("---")

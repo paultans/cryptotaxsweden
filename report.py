@@ -30,7 +30,10 @@ parser.add_argument('--rounding-report', help='Generate report of roundings done
 parser.add_argument('--rounding-report-threshold', help='The number of percent difference required for an amount to be included in the report.', default='1')
 parser.add_argument('--cointracking-usd', help='Use this flag if you have configured cointracking calculate prices in USD. Conversion from USD to SEK will then be done by this script instead.', action='store_true')
 parser.add_argument('--max-overdraft', type=float, help='The maximum overdraft to allow for each coin, at the event of an overdraft the coin balance will be set to zero.', default=1e-9)
-parser.add_argument('--income-report', help='Generate T2 income report for taxable crypto income (Mining, Staking, Interest, etc.)', action='store_true')
+parser.add_argument('--income-report', help='Generate T2 income report CSV for taxable crypto income (Mining, Staking, Interest, etc.)', action='store_true')
+parser.add_argument('--t2-sru', help='Generate T2 SRU file for electronic submission to Skatteverket', action='store_true')
+parser.add_argument('--t2-expenses', type=int, default=0, help='Total expenses (kontanta utgifter) for T2 form in SEK')
+parser.add_argument('--t2-schablon', type=float, default=0.25, help='Schablonavdrag percentage for egenavgifter (0.25 for born 1959+, 0.10 for older)')
 
 # New features
 parser.add_argument('--validate', help='Validate trade data before processing', action='store_true')
@@ -127,4 +130,20 @@ if opts.income_report:
     )
     print(f"\nT2 Income Report: {os.path.join(opts.out, 'income_report_t2.csv')}")
     print(f"  Total taxable crypto income: {round(income_total)} SEK")
+
+# Generate T2 SRU file if requested
+if opts.t2_sru:
+    t2_income, t2_result = tax.generate_t2_sru_report(
+        trades, from_date, to_date, personal_details, opts.out,
+        expenses=opts.t2_expenses,
+        schablon_percent=opts.t2_schablon,
+        append_to_k4=True
+    )
+    if t2_income > 0:
+        print(f"\nT2 SRU generated (appended to blanketter.sru)")
+        print(f"  Total hobby income: {t2_income:,} SEK")
+        print(f"  Result (for INK1 p.1.6): {t2_result:,} SEK")
+        print(f"  Note: Test with Skatteverket's test function before production use")
+    else:
+        print(f"\nNo taxable crypto income found - T2 SRU not generated")
 
