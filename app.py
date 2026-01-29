@@ -90,7 +90,7 @@ else:
         st.stop()
     
     # Tabs for different views
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 Validation", "🔄 Transfers", "📄 Generate Report", "📈 Holdings"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Validation", "🔄 Transfers", "📄 Generate Report", "📈 Holdings", "💰 Profit/Loss"])
     
     with tab1:
         st.header("Trade Data Validation")
@@ -320,6 +320,97 @@ else:
             st.metric("Total Portfolio Cost Basis", f"{total_cost:,.0f} SEK")
         else:
             st.info("No holdings found for this year")
+
+    with tab5:
+        st.header("Profit/Loss Breakdown by Coin")
+        st.markdown("Sanity check your tax calculation by reviewing profits and losses per coin.")
+
+        from_date = datetime.datetime(year=year, month=1, day=1)
+        to_date = datetime.datetime(year=year, month=12, day=31, hour=23, minute=59)
+
+        # Compute tax events
+        tax_events = tax.compute_tax(
+            trades, from_date, to_date, max_overdraft,
+            exclude_groups=[]
+        )
+
+        if tax_events is None:
+            st.error("Error computing tax events. Check the Validation tab for issues.")
+        else:
+            # Aggregate by coin
+            coin_summary = {}
+            for te in tax_events:
+                if te.name not in coin_summary:
+                    coin_summary[te.name] = {'profit': 0.0, 'loss': 0.0, 'income': 0.0, 'cost': 0.0, 'amount': 0.0}
+                p = te.profit()
+                if p > 0:
+                    coin_summary[te.name]['profit'] += p
+                else:
+                    coin_summary[te.name]['loss'] += abs(p)
+                coin_summary[te.name]['income'] += te.income
+                coin_summary[te.name]['cost'] += te.cost
+                coin_summary[te.name]['amount'] += te.amount
+
+            # Calculate totals
+            total_profit = sum(d['profit'] for d in coin_summary.values())
+            total_loss = sum(d['loss'] for d in coin_summary.values())
+            net = total_profit - total_loss
+
+            # Summary metrics
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Total Profit", f"{total_profit:,.0f} SEK")
+            col2.metric("Total Loss", f"{total_loss:,.0f} SEK")
+            col3.metric("Net", f"{net:,.0f} SEK", delta=f"{net:,.0f}")
+
+            # Top Profits
+            st.subheader("Top Profits")
+            profit_data = []
+            for coin, data in sorted(coin_summary.items(), key=lambda x: -x[1]['profit']):
+                if data['profit'] > 0:
+                    profit_data.append({
+                        'Coin': coin,
+                        'Profit (SEK)': round(data['profit']),
+                        'Income (SEK)': round(data['income']),
+                        'Cost (SEK)': round(data['cost']),
+                        'Amount': round(data['amount'], 4)
+                    })
+
+            if profit_data:
+                st.dataframe(pd.DataFrame(profit_data[:15]), use_container_width=True)
+            else:
+                st.info("No profits recorded")
+
+            # Top Losses
+            st.subheader("Top Losses")
+            loss_data = []
+            for coin, data in sorted(coin_summary.items(), key=lambda x: -x[1]['loss']):
+                if data['loss'] > 0:
+                    loss_data.append({
+                        'Coin': coin,
+                        'Loss (SEK)': round(data['loss']),
+                        'Income (SEK)': round(data['income']),
+                        'Cost (SEK)': round(data['cost']),
+                        'Amount': round(data['amount'], 4)
+                    })
+
+            if loss_data:
+                st.dataframe(pd.DataFrame(loss_data[:15]), use_container_width=True)
+            else:
+                st.info("No losses recorded")
+
+            # Full breakdown (expandable)
+            with st.expander("View All Coins"):
+                all_data = []
+                for coin, data in sorted(coin_summary.items()):
+                    all_data.append({
+                        'Coin': coin,
+                        'Profit (SEK)': round(data['profit']),
+                        'Loss (SEK)': round(data['loss']),
+                        'Net (SEK)': round(data['profit'] - data['loss']),
+                        'Income (SEK)': round(data['income']),
+                        'Cost (SEK)': round(data['cost'])
+                    })
+                st.dataframe(pd.DataFrame(all_data), use_container_width=True)
 
 # Footer
 st.sidebar.markdown("---")
