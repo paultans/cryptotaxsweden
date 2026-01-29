@@ -220,3 +220,35 @@ class TaxEvent:
             for event in d["trades"]:
                 events.append(TaxEvent(event["amount"], event["name"], event["income"], event["costbase"]))
             return events
+
+
+class TradeEvent:
+    """Records a single trade with cost basis changes for calculation report.
+
+    This class tracks how each trade affects the cost basis, enabling
+    detailed calculation reports that show the tax calculation logic.
+    """
+
+    def __init__(
+        self,
+        date: datetime,
+        name: str,
+        amount: float,
+        price: float,
+        total_amount_before: float,
+        total_amount_after: float,
+        cost_basis_before: float,
+        cost_basis_after: float,
+        tax_event: Optional[TaxEvent],
+        trade_type: str
+    ) -> None:
+        self.date = date
+        self.name = name
+        self.amount = amount  # Positive for buy, negative for sell
+        self.price = price
+        self.total_amount_before = total_amount_before
+        self.total_amount_after = total_amount_after
+        self.cost_basis_before = cost_basis_before
+        self.cost_basis_after = cost_basis_after
+        self.tax_event = tax_event  # Only set for sell events
+        self.trade_type = trade_type

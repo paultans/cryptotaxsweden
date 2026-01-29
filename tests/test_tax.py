@@ -229,18 +229,18 @@ class TestComputeTaxTradeTypes:
         """Staking should add coins with market value cost basis."""
         from tax import compute_tax
         MockTrade, MockTrades = mock_trades_class
-        
+
         trades = MockTrades([
             MockTrade(type='Staking', buy_coin='ETH', buy_amount=1.0, buy_value=20000.0),
             MockTrade(type='Trade', buy_coin='SEK', buy_amount=25000.0, buy_value=25000.0,
                      sell_coin='ETH', sell_amount=1.0, sell_value=25000.0),
         ])
-        
+
         from_date = datetime(2025, 1, 1)
         to_date = datetime(2025, 12, 31)
-        
-        tax_events = compute_tax(trades, from_date, to_date, max_overdraft=0)
-        
+
+        tax_events, _ = compute_tax(trades, from_date, to_date, max_overdraft=0)
+
         assert len(tax_events) == 1
         # Sold 1 ETH for 25000, cost basis was 20000 (from staking)
         assert tax_events[0].income == 25000.0
@@ -251,18 +251,18 @@ class TestComputeTaxTradeTypes:
         """Interest Income should add coins with market value cost basis."""
         from tax import compute_tax
         MockTrade, MockTrades = mock_trades_class
-        
+
         trades = MockTrades([
             MockTrade(type='Interest Income', buy_coin='BTC', buy_amount=0.1, buy_value=50000.0),
             MockTrade(type='Trade', buy_coin='SEK', buy_amount=60000.0, buy_value=60000.0,
                      sell_coin='BTC', sell_amount=0.1, sell_value=60000.0),
         ])
-        
+
         from_date = datetime(2025, 1, 1)
         to_date = datetime(2025, 12, 31)
-        
-        tax_events = compute_tax(trades, from_date, to_date, max_overdraft=0)
-        
+
+        tax_events, _ = compute_tax(trades, from_date, to_date, max_overdraft=0)
+
         assert len(tax_events) == 1
         assert tax_events[0].income == 60000.0
         assert tax_events[0].cost == 50000.0
@@ -272,18 +272,18 @@ class TestComputeTaxTradeTypes:
         """Reward / Bonus should add coins with market value cost basis."""
         from tax import compute_tax
         MockTrade, MockTrades = mock_trades_class
-        
+
         trades = MockTrades([
             MockTrade(type='Reward / Bonus', buy_coin='DOT', buy_amount=10.0, buy_value=1000.0),
             MockTrade(type='Trade', buy_coin='SEK', buy_amount=1500.0, buy_value=1500.0,
                      sell_coin='DOT', sell_amount=10.0, sell_value=1500.0),
         ])
-        
+
         from_date = datetime(2025, 1, 1)
         to_date = datetime(2025, 12, 31)
-        
-        tax_events = compute_tax(trades, from_date, to_date, max_overdraft=0)
-        
+
+        tax_events, _ = compute_tax(trades, from_date, to_date, max_overdraft=0)
+
         assert len(tax_events) == 1
         assert tax_events[0].profit() == 500.0
 
@@ -291,18 +291,18 @@ class TestComputeTaxTradeTypes:
         """Airdrop should add coins with zero cost basis (like gifts)."""
         from tax import compute_tax
         MockTrade, MockTrades = mock_trades_class
-        
+
         trades = MockTrades([
             MockTrade(type='Airdrop', buy_coin='ABC', buy_amount=100.0, buy_value=1000.0),
             MockTrade(type='Trade', buy_coin='SEK', buy_amount=2000.0, buy_value=2000.0,
                      sell_coin='ABC', sell_amount=100.0, sell_value=2000.0),
         ])
-        
+
         from_date = datetime(2025, 1, 1)
         to_date = datetime(2025, 12, 31)
-        
-        tax_events = compute_tax(trades, from_date, to_date, max_overdraft=0)
-        
+
+        tax_events, _ = compute_tax(trades, from_date, to_date, max_overdraft=0)
+
         assert len(tax_events) == 1
         # Airdrop has 0 cost basis, so full sale price is profit
         assert tax_events[0].income == 2000.0
@@ -313,19 +313,132 @@ class TestComputeTaxTradeTypes:
         """Gift/Tip should add coins with zero cost basis."""
         from tax import compute_tax
         MockTrade, MockTrades = mock_trades_class
-        
+
         trades = MockTrades([
             MockTrade(type='Gift/Tip', buy_coin='BTC', buy_amount=0.01, buy_value=5000.0),
             MockTrade(type='Trade', buy_coin='SEK', buy_amount=6000.0, buy_value=6000.0,
                      sell_coin='BTC', sell_amount=0.01, sell_value=6000.0),
         ])
-        
+
         from_date = datetime(2025, 1, 1)
         to_date = datetime(2025, 12, 31)
-        
-        tax_events = compute_tax(trades, from_date, to_date, max_overdraft=0)
-        
+
+        tax_events, _ = compute_tax(trades, from_date, to_date, max_overdraft=0)
+
         assert len(tax_events) == 1
         assert tax_events[0].cost == 0.0
         assert tax_events[0].profit() == 6000.0
+
+
+class TestTradeEventTracking:
+    """Tests for TradeEvent tracking in compute_tax."""
+
+    @pytest.fixture
+    def mock_trades_class(self):
+        """Create a mock Trades-like object."""
+        class MockTrade:
+            def __init__(self, type, buy_coin, buy_amount, buy_value,
+                         sell_coin=None, sell_amount=None, sell_value=None, group=None):
+                self.lineno = 1
+                self.date = datetime(2025, 6, 15)
+                self.type = type
+                self.group = group
+                self.buy_coin = buy_coin
+                self.buy_amount = buy_amount
+                self.buy_value = buy_value
+                self.sell_coin = sell_coin
+                self.sell_amount = sell_amount
+                self.sell_value = sell_value
+
+        class MockTrades:
+            def __init__(self, trades):
+                self.trades = trades
+
+        return MockTrade, MockTrades
+
+    def test_trade_events_empty_when_not_tracking(self, mock_trades_class):
+        """Trade events should be empty when not tracking."""
+        from tax import compute_tax
+        MockTrade, MockTrades = mock_trades_class
+
+        trades = MockTrades([
+            MockTrade(type='Trade', buy_coin='BTC', buy_amount=1.0, buy_value=50000.0,
+                     sell_coin='SEK', sell_amount=50000.0, sell_value=50000.0),
+        ])
+
+        from_date = datetime(2025, 1, 1)
+        to_date = datetime(2025, 12, 31)
+
+        tax_events, trade_events = compute_tax(trades, from_date, to_date, max_overdraft=0,
+                                               track_trade_events=False)
+
+        assert len(trade_events) == 0
+
+    def test_trade_events_recorded_when_tracking(self, mock_trades_class):
+        """Trade events should be recorded when tracking."""
+        from tax import compute_tax
+        MockTrade, MockTrades = mock_trades_class
+
+        trades = MockTrades([
+            MockTrade(type='Trade', buy_coin='BTC', buy_amount=1.0, buy_value=50000.0,
+                     sell_coin='SEK', sell_amount=50000.0, sell_value=50000.0),
+        ])
+
+        from_date = datetime(2025, 1, 1)
+        to_date = datetime(2025, 12, 31)
+
+        tax_events, trade_events = compute_tax(trades, from_date, to_date, max_overdraft=0,
+                                               track_trade_events=True)
+
+        assert len(trade_events) == 1
+        assert trade_events[0].name == 'BTC'
+        assert trade_events[0].amount == 1.0
+
+    def test_trade_events_include_buy_and_sell(self, mock_trades_class):
+        """Trade events should include both buys and sells."""
+        from tax import compute_tax
+        MockTrade, MockTrades = mock_trades_class
+
+        trades = MockTrades([
+            MockTrade(type='Trade', buy_coin='BTC', buy_amount=1.0, buy_value=50000.0,
+                     sell_coin='SEK', sell_amount=50000.0, sell_value=50000.0),
+            MockTrade(type='Trade', buy_coin='SEK', buy_amount=60000.0, buy_value=60000.0,
+                     sell_coin='BTC', sell_amount=1.0, sell_value=60000.0),
+        ])
+
+        from_date = datetime(2025, 1, 1)
+        to_date = datetime(2025, 12, 31)
+
+        tax_events, trade_events = compute_tax(trades, from_date, to_date, max_overdraft=0,
+                                               track_trade_events=True)
+
+        assert len(trade_events) == 2
+        # First event: buy
+        assert trade_events[0].amount > 0
+        # Second event: sell
+        assert trade_events[1].amount < 0
+
+    def test_trade_events_cost_basis_tracking(self, mock_trades_class):
+        """Trade events should track cost basis changes correctly."""
+        from tax import compute_tax
+        MockTrade, MockTrades = mock_trades_class
+
+        trades = MockTrades([
+            MockTrade(type='Trade', buy_coin='BTC', buy_amount=1.0, buy_value=40000.0,
+                     sell_coin='SEK', sell_amount=40000.0, sell_value=40000.0),
+            MockTrade(type='Trade', buy_coin='BTC', buy_amount=1.0, buy_value=60000.0,
+                     sell_coin='SEK', sell_amount=60000.0, sell_value=60000.0),
+        ])
+
+        from_date = datetime(2025, 1, 1)
+        to_date = datetime(2025, 12, 31)
+
+        tax_events, trade_events = compute_tax(trades, from_date, to_date, max_overdraft=0,
+                                               track_trade_events=True)
+
+        assert len(trade_events) == 2
+        # First buy: cost basis = 40000
+        assert trade_events[0].cost_basis_after == 40000.0
+        # Second buy: average cost = (40000 + 60000) / 2 = 50000
+        assert trade_events[1].cost_basis_after == 50000.0
 

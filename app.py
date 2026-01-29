@@ -51,6 +51,8 @@ simplified_k4 = st.sidebar.checkbox("Simplified K4 (aggregate per coin)", value=
 generate_income_report = st.sidebar.checkbox("Generate T2 Income Report (CSV)", value=True)
 generate_t2_sru = st.sidebar.checkbox("Generate T2 SRU (for upload)", value=False,
                                        help="Generate SRU file for T2 hobby income form")
+generate_calc_report = st.sidebar.checkbox("Generate Calculation Report", value=False,
+                                           help="Detailed CSV showing cost basis changes per trade")
 show_holdings = st.sidebar.checkbox("Show Holdings Summary", value=True)
 
 # Advanced options
@@ -186,11 +188,12 @@ else:
                     from_date = datetime.datetime(year=year, month=1, day=1)
                     to_date = datetime.datetime(year=year, month=12, day=31, hour=23, minute=59)
                     
-                    tax_events = tax.compute_tax(
+                    tax_events, trade_events = tax.compute_tax(
                         trades, from_date, to_date, max_overdraft,
-                        exclude_groups=[]
+                        exclude_groups=[],
+                        track_trade_events=generate_calc_report
                     )
-                    
+
                     if tax_events is None:
                         st.error("Error computing tax events")
                     else:
@@ -295,6 +298,24 @@ else:
                                     key="blanketter_with_t2"
                                 )
 
+                        # Generate calculation report if requested
+                        if generate_calc_report and trade_events:
+                            tax.generate_calculation_report(trade_events, output_dir)
+                            calc_file = f"{output_dir}/calculation_report.csv"
+                            if os.path.exists(calc_file):
+                                st.success("✅ Calculation report generated!")
+                                with open(calc_file, "r", encoding="utf-8") as f:
+                                    calc_report = f.read()
+                                st.download_button(
+                                    "📥 Download Calculation Report (CSV)",
+                                    calc_report,
+                                    file_name="calculation_report.csv",
+                                    mime="text/csv"
+                                )
+
+                                # Show info about per-coin reports
+                                st.info("Per-coin calculation reports also generated in output folder")
+
                         # Show totals
                         st.subheader("Tax Summary")
                         crypto_events = [x for x in display_events if not tax.is_fiat(x.name)]
@@ -367,7 +388,7 @@ else:
         to_date = datetime.datetime(year=year, month=12, day=31, hour=23, minute=59)
 
         # Compute tax events
-        tax_events = tax.compute_tax(
+        tax_events, _ = tax.compute_tax(
             trades, from_date, to_date, max_overdraft,
             exclude_groups=[]
         )

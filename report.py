@@ -42,6 +42,7 @@ parser.add_argument('--update-rates', help='Update USD/SEK rates from Riksbanken
 parser.add_argument('--save-state', help='Save coin state at end of year for use in next year', action='store_true')
 parser.add_argument('--load-state', help='Load coin state from file (e.g., out/coin_state_2024.json)', type=str)
 parser.add_argument('--holdings', help='Show current holdings summary after processing', action='store_true')
+parser.add_argument('--calculation-report', help='Generate detailed calculation report showing cost basis changes per trade', action='store_true')
 
 opts = parser.parse_args()
 
@@ -87,7 +88,7 @@ stock_tax_events = TaxEvent.read_stock_tax_events_from("data/stocks.json") if os
 from_date = datetime.datetime(year=opts.year, month=1, day=1, hour=0, minute=0)
 to_date = datetime.datetime(year=opts.year, month=12, day=31, hour=23, minute=59)
 
-tax_events = tax.compute_tax(trades,
+tax_events, trade_events = tax.compute_tax(trades,
                              from_date,
                              to_date,
                              opts.max_overdraft,
@@ -96,11 +97,18 @@ tax_events = tax.compute_tax(trades,
                              load_state_file=opts.load_state,
                              save_state_file=os.path.join(opts.out, f"coin_state_{opts.year}.json") if opts.save_state else None,
                              show_holdings=opts.holdings,
+                             track_trade_events=opts.calculation_report,
                              )
 
 if tax_events is None:
     print(f"Aborting tax computation.")
     sys.exit(1)
+
+# Generate calculation report if requested
+if opts.calculation_report and trade_events:
+    tax.generate_calculation_report(trade_events, opts.out)
+    print(f"\nCalculation Report: {os.path.join(opts.out, 'calculation_report.csv')}")
+    print(f"  Per-coin reports also generated in {opts.out}/")
 
 if opts.simplified_k4:
     tax_events = tax.aggregate_per_coin(tax_events)
