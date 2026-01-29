@@ -256,7 +256,24 @@ else:
                         else:
                             tax.generate_k4_pdf(pages, output_dir)
                             st.success("✅ PDF files generated in out/streamlit/")
-                        
+
+                        # Generate T2 Income Report if requested
+                        if generate_income_report:
+                            income_file = f"{output_dir}/income_report.csv"
+                            total_income = tax.generate_income_report(
+                                trades, from_date, to_date, income_file
+                            )
+                            if total_income > 0:
+                                st.info(f"💰 Total taxable crypto income: {round(total_income):,} SEK (see T2 report)")
+                                with open(income_file, "r", encoding="utf-8") as f:
+                                    income_text = f.read()
+                                st.download_button(
+                                    "📥 Download T2 Income Report",
+                                    income_text,
+                                    file_name="income_report.csv",
+                                    mime="text/csv"
+                                )
+
                         # Show totals
                         st.subheader("Tax Summary")
                         crypto_events = [x for x in display_events if not tax.is_fiat(x.name)]
