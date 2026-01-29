@@ -1,26 +1,75 @@
+"""Tax computation functions for Swedish cryptocurrency tax reporting.
+
+This module provides functions for computing capital gains/losses using
+the average cost basis method required by Swedish tax law.
+"""
+
 import os
+from typing import List, Dict, Optional, Tuple, Any
 
-from taxdata import TaxEvent, Trade
+from taxdata import TaxEvent, Trade, Trades, PersonalDetails, TradeEvent
 from k4page import K4Section, K4Page
+from t2page import T2Data, T2Page, generate_t2_sru
 
 
-def is_fiat(coin):
+def is_fiat(coin: str) -> bool:
+    """Check if a currency is a fiat currency."""
     return coin in ["EUR", "USD", "SEK"]
 
 
 class Coin:
-    def __init__(self, symbol, max_overdraft):
+    """Tracks holdings and cost basis for a single cryptocurrency.
+
+    Uses the average cost basis method (genomsnittsmetoden) required
+    by Swedish tax law.
+    """
+
+    def __init__(self, symbol: str, max_overdraft: float, trade_events: Optional[List['TradeEvent']] = None) -> None:
         self.symbol = symbol
         self.amount = 0.0
         self.cost_basis = 0.0
         self.max_overdraft = max_overdraft
+        self.trade_events = trade_events
 
-    def buy(self, amount:float, price:float):
+    def buy(self, amount: float, price: float, date: Any = None, trade_type: str = '') -> None:
+        """Add coins and update average cost basis.
+
+        Args:
+            amount: Number of coins to add.
+            price: Total price paid in SEK.
+            date: Trade date (for calculation report).
+            trade_type: Type of trade (for calculation report).
+        """
         new_amount = self.amount + amount
-        self.cost_basis = (self.cost_basis * self.amount + price) / new_amount
-        self.amount = new_amount
+        new_cost_basis = (self.cost_basis * self.amount + price) / new_amount
 
-    def sell(self, amount:float, price:float) -> TaxEvent:
+        # Record trade event for calculation report
+        if self.trade_events is not None and date is not None:
+            self.trade_events.append(TradeEvent(
+                date, self.symbol, amount, price,
+                self.amount, new_amount,
+                self.cost_basis, new_cost_basis,
+                None, trade_type
+            ))
+
+        self.amount = new_amount
+        self.cost_basis = new_cost_basis
+
+    def sell(self, amount: float, price: float, date: Any = None, trade_type: str = '') -> TaxEvent:
+        """Sell coins and create a tax event.
+
+        Args:
+            amount: Number of coins to sell.
+            price: Total sale price in SEK.
+            date: Trade date (for calculation report).
+            trade_type: Type of trade (for calculation report).
+
+        Returns:
+            TaxEvent with the sale details.
+
+        Raises:
+            Exception: If selling more than owned (beyond max_overdraft).
+        """
         amount_left = self.amount - amount
         if amount_left < -self.max_overdraft:
             raise Exception(f"Not enough coins available for {self.symbol}, {self.amount} < {amount}.")
@@ -29,23 +78,77 @@ class Coin:
 
         tax_event = TaxEvent(amount, self.symbol, price, self.cost_basis * amount)
 
+        # Record trade event for calculation report
+        if self.trade_events is not None and date is not None:
+            self.trade_events.append(TradeEvent(
+                date, self.symbol, -amount, price,
+                self.amount, amount_left,
+                self.cost_basis, self.cost_basis,  # cost_basis doesn't change on sell
+                tax_event, trade_type
+            ))
+
         self.amount = amount_left
 
         return tax_event
 
 
-def compute_tax(trades, from_date, to_date, max_overdraft, native_currency='SEK', exclude_groups=[], coin_report_filename=None):
-    tax_events = []
-    coins = {}
+def compute_tax(
+    trades: Trades,
+    from_date: Any,
+    to_date: Any,
+    max_overdraft: float,
+    native_currency: str = 'SEK',
+    exclude_groups: List[str] = [],
+    coin_report_filename: Optional[str] = None,
+    load_state_file: Optional[str] = None,
+    save_state_file: Optional[str] = None,
+    show_holdings: bool = False,
+    track_trade_events: bool = False
+) -> Tuple[Optional[List[TaxEvent]], List['TradeEvent']]:
+    """Compute tax events from trades using average cost basis.
 
-    def get_buy_coin(trade:Trade):
+    Args:
+        trades: Trades object containing all trades.
+        from_date: Start date for tax reporting period.
+        to_date: End date for tax reporting period.
+        max_overdraft: Maximum allowed negative balance per coin.
+        native_currency: Base currency (default: SEK).
+        exclude_groups: Trade groups to exclude.
+        coin_report_filename: If set, write coin report to this file.
+        load_state_file: If set, load initial coin state from this file.
+        save_state_file: If set, save final coin state to this file.
+        show_holdings: If True, print holdings summary after processing.
+        track_trade_events: If True, record trade events for calculation report.
+
+    Returns:
+        Tuple of (List of TaxEvents or None if error, List of TradeEvents).
+    """
+    tax_events: List[TaxEvent] = []
+    trade_events: List[TradeEvent] = [] if track_trade_events else []
+    coins: Dict[str, Coin] = {}
+    
+    # Load initial state if provided
+    if load_state_file:
+        from coin_state import CoinState
+        state = CoinState.load(load_state_file)
+        for symbol, data in state.coins.items():
+            coin = Coin(symbol, max_overdraft)
+            coin.amount = data['amount']
+            coin.cost_basis = data['cost_basis']
+            coins[symbol] = coin
+        print(f"Loaded state from {state.as_of_date}: {len(state.coins)} coins")
+
+    def get_buy_coin(trade: Trade) -> Optional[Coin]:
         if trade.buy_coin == native_currency:
             return None
         if trade.buy_coin not in coins:
-            coins[trade.buy_coin] = Coin(trade.buy_coin, max_overdraft)
+            coins[trade.buy_coin] = Coin(
+                trade.buy_coin, max_overdraft,
+                trade_events if track_trade_events else None
+            )
         return coins[trade.buy_coin]
 
-    def get_sell_coin(trade:Trade):
+    def get_sell_coin(trade: Trade) -> Optional[Coin]:
         if trade.sell_coin == native_currency:
             return None
         if trade.sell_coin not in coins:
@@ -70,32 +173,69 @@ def compute_tax(trades, from_date, to_date, max_overdraft, native_currency='SEK'
                     value_sek = trade.buy_value
 
                 if buy_coin:
-                    buy_coin.buy(trade.buy_amount, value_sek)
+                    buy_coin.buy(trade.buy_amount, value_sek, trade.date, trade.type)
                 if sell_coin:
-                    tax_event = sell_coin.sell(trade.sell_amount, value_sek)
+                    tax_event = sell_coin.sell(trade.sell_amount, value_sek, trade.date, trade.type)
                     if trade.date >= from_date:
                         tax_events.append(tax_event)
 
             elif trade.type == 'Mining':
                 buy_coin = get_buy_coin(trade)
                 if buy_coin:
-                    buy_coin.buy(trade.buy_amount, trade.buy_value)
+                    buy_coin.buy(trade.buy_amount, trade.buy_value, trade.date, trade.type)
 
             elif trade.type == 'Gift/Tip':
                 buy_coin = get_buy_coin(trade)
                 if buy_coin:
-                    buy_coin.buy(trade.buy_amount, 0.0)
+                    buy_coin.buy(trade.buy_amount, 0.0, trade.date, trade.type)
+
+            # Income types - taxable as income in Sweden, cost basis = market value when received
+            elif trade.type == 'Interest Income':
+                buy_coin = get_buy_coin(trade)
+                if buy_coin:
+                    buy_coin.buy(trade.buy_amount, trade.buy_value, trade.date, trade.type)
+
+            elif trade.type == 'Staking':
+                # Staking rewards are taxable income in Sweden
+                buy_coin = get_buy_coin(trade)
+                if buy_coin:
+                    buy_coin.buy(trade.buy_amount, trade.buy_value, trade.date, trade.type)
+
+            elif trade.type == 'Reward / Bonus':
+                # Rewards are taxable income in Sweden
+                buy_coin = get_buy_coin(trade)
+                if buy_coin:
+                    buy_coin.buy(trade.buy_amount, trade.buy_value, trade.date, trade.type)
+
+            elif trade.type == 'Income (non taxable)':
+                # E.g., Celsius loan - still track cost basis at market value
+                buy_coin = get_buy_coin(trade)
+                if buy_coin:
+                    buy_coin.buy(trade.buy_amount, trade.buy_value, trade.date, trade.type)
+
+            elif trade.type == 'Income':
+                # Crypto received as income (salary, freelance, etc.)
+                # Taxable as income when received, cost basis = market value
+                buy_coin = get_buy_coin(trade)
+                if buy_coin:
+                    buy_coin.buy(trade.buy_amount, trade.buy_value, trade.date, trade.type)
+
+            elif trade.type == 'Airdrop':
+                # Airdrops typically have zero cost basis (like gifts)
+                buy_coin = get_buy_coin(trade)
+                if buy_coin:
+                    buy_coin.buy(trade.buy_amount, 0.0, trade.date, trade.type)
 
             elif trade.type == 'Spend':
                 sell_coin = get_sell_coin(trade)
                 if sell_coin:
-                    tax_event = sell_coin.sell(trade.sell_amount, trade.sell_value)
+                    tax_event = sell_coin.sell(trade.sell_amount, trade.sell_value, trade.date, trade.type)
                     if trade.date >= from_date:
                         tax_events.append(tax_event)
 
         except Exception as e:
             print(f"Exception encountered at line {trade.lineno} in trades csv-file: {e}")
-            return None
+            return None, trade_events
 
     if coin_report_filename:
         with open(coin_report_filename, "w") as f:
@@ -105,11 +245,42 @@ def compute_tax(trades, from_date, to_date, max_overdraft, native_currency='SEK'
             for coin in coin_list:
                 f.write(f"{str(coin.amount)[:12].ljust(14)}{str(coin.symbol).ljust(8)}{str(coin.cost_basis)[:8].ljust(10)}\n")
 
-    return tax_events
+    # Save state if requested
+    if save_state_file:
+        from coin_state import CoinState
+        state = CoinState()
+        state.year = to_date.year
+        state.as_of_date = to_date.strftime('%Y-%m-%d')
+        for symbol, coin in coins.items():
+            if coin.amount > 1e-9:
+                state.add_coin(symbol, coin.amount, coin.cost_basis)
+        state.save(save_state_file)
+    
+    # Show holdings summary if requested
+    if show_holdings:
+        print("\n" + "=" * 60)
+        print("Holdings Summary (as of end of year)")
+        print("=" * 60)
+        total_cost = 0.0
+        coin_list = [(s, c) for s, c in coins.items() if c.amount > 1e-9]
+        coin_list.sort(key=lambda x: x[0])
+        for symbol, coin in coin_list:
+            cost = coin.amount * coin.cost_basis
+            total_cost += cost
+            print(f"  {symbol:8} {coin.amount:>14.6f} @ {coin.cost_basis:>10.2f} = {cost:>12,.0f} SEK")
+        print("-" * 60)
+        print(f"  Total cost basis: {total_cost:,.0f} SEK")
+        print("=" * 60)
+
+    return tax_events, trade_events
 
 
-def aggregate_per_coin(tax_events):
-    aggregate_tax_events = {}
+def aggregate_per_coin(tax_events: List[TaxEvent]) -> List[TaxEvent]:
+    """Aggregate tax events by coin, separating profits and losses.
+    
+    Swedish K4 requires profits and losses to be reported separately.
+    """
+    aggregate_tax_events: Dict[str, Tuple[TaxEvent, TaxEvent]] = {}
     for tax_event in tax_events:
         if tax_event.name not in aggregate_tax_events:
             aggregate_tax_events[tax_event.name] = (TaxEvent(0.0, tax_event.name, 0.0, 0.0), TaxEvent(0.0, tax_event.name, 0.0, 0.0))
@@ -125,7 +296,7 @@ def aggregate_per_coin(tax_events):
 
     sorted_aggregate_events = list(aggregate_tax_events.items())
     sorted_aggregate_events.sort()
-    new_tax_events = []
+    new_tax_events: List[TaxEvent] = []
     for (name, (aggregate_profit_tax_event, aggregate_loss_tax_event)) in sorted_aggregate_events:
         if (aggregate_profit_tax_event.amount > 0.0):
             new_tax_events.append(aggregate_profit_tax_event)
@@ -134,7 +305,8 @@ def aggregate_per_coin(tax_events):
     return new_tax_events
 
 
-def rounding_report(tax_events, threshold, report_filename):
+def rounding_report(tax_events: List[TaxEvent], threshold: float, report_filename: str) -> None:
+    """Generate a report of rounding differences for Övriga Upplysningar."""
     with open(report_filename, 'w', encoding='utf-8') as f:
         f.write(f"Decimaler stöds ej för bilaga K4 på skatteverket.se.\n")
         f.write(f"Här är en lista på avrundningar där det avrundade antalet skiljer sig mer än {str(threshold*100)[:4]}% från det egentliga antalet:\n")
@@ -149,19 +321,24 @@ def rounding_report(tax_events, threshold, report_filename):
         raise Exception("Rounding report is longer than 999 characters (the limit on skatteverket.se), consider increasing the threshold --rounding-report-threshold and doing a simplified K4 --simplified-k4.")
 
 
-def convert_to_integer_amounts(tax_events):
-    new_events = []
+def convert_to_integer_amounts(tax_events: List[TaxEvent]) -> List[TaxEvent]:
+    """Convert amounts to integers by rounding."""
+    new_events: List[TaxEvent] = []
     for tax_event in tax_events:
         tax_event.amount = round(tax_event.amount)
         new_events.append(tax_event)
     return new_events
 
 
-def convert_to_integer_amounts_with_prefix(tax_events, precision_loss_tolerance=0.1):
+def convert_to_integer_amounts_with_prefix(
+    tax_events: List[TaxEvent], 
+    precision_loss_tolerance: float = 0.1
+) -> List[TaxEvent]:
+    """Convert amounts to integers, adding prefixes (milli, micro) if needed."""
     prefixes = [("", 1.0), ("milli", 1000.0), ("micro", 1000000.0)]
 
-    # Check which coins need to be modified to not lose to much precision.
-    coin_prefixes = {}
+    # Check which coins need to be modified to not lose too much precision.
+    coin_prefixes: Dict[str, Tuple[str, float]] = {}
     coins = set([x.name for x in tax_events])
     for coin in coins:
         if not is_fiat(coin):
@@ -175,7 +352,7 @@ def convert_to_integer_amounts_with_prefix(tax_events, precision_loss_tolerance=
             coin_prefixes[coin] = (prefix, factor)
 
     # Convert amount to integer
-    new_events = []
+    new_events: List[TaxEvent] = []
     for tax_event in tax_events:
         if tax_event.name in coin_prefixes:
             tax_event.amount = round(coin_prefixes[tax_event.name][1] * tax_event.amount)
@@ -187,8 +364,9 @@ def convert_to_integer_amounts_with_prefix(tax_events, precision_loss_tolerance=
     return new_events
 
 
-def convert_sek_to_integer_amounts(tax_events):
-    new_events = []
+def convert_sek_to_integer_amounts(tax_events: List[TaxEvent]) -> List[TaxEvent]:
+    """Round SEK amounts to integers."""
+    new_events: List[TaxEvent] = []
     for tax_event in tax_events:
         tax_event.income = round(tax_event.income)
         tax_event.cost = round(tax_event.cost)
@@ -196,13 +374,19 @@ def convert_sek_to_integer_amounts(tax_events):
     return new_events
 
 
-def generate_k4_pages(year, personal_details, tax_events, stock_tax_events=None):
-    def generate_section(events):
-        lines = []
+def generate_k4_pages(
+    year: int, 
+    personal_details: PersonalDetails, 
+    tax_events: List[TaxEvent], 
+    stock_tax_events: Optional[List[TaxEvent]] = None
+) -> List[K4Page]:
+    """Generate K4 form pages from tax events."""
+    def generate_section(events: List[TaxEvent]) -> K4Section:
+        lines: List[List[Optional[str]]] = []
         num_sums = [0, 0, 0, 0]
         for event in events:
             k4_fields = event.k4_fields()
-            line = []
+            line: List[Optional[str]] = []
             for (field_index, field) in enumerate(k4_fields):
                 if field_index > 3:
                     line.append(str(field) if field else None)
@@ -217,7 +401,7 @@ def generate_k4_pages(year, personal_details, tax_events, stock_tax_events=None)
     fiat_events = [x for x in tax_events if is_fiat(x.name)]
     crypto_events = [x for x in tax_events if not is_fiat(x.name)]
 
-    pages = []
+    pages: List[K4Page] = []
     page_number = 1
     while True:
         if stock_tax_events:
@@ -237,9 +421,10 @@ def generate_k4_pages(year, personal_details, tax_events, stock_tax_events=None)
     return pages
 
 
-def generate_k4_sru(pages, personal_details, destination_folder):
+def generate_k4_sru(pages: List[K4Page], personal_details: PersonalDetails, destination_folder: str) -> None:
+    """Generate K4 SRU files for digital submission."""
     # Generate info.sru
-    lines = []
+    lines: List[str] = []
     lines.append("#DATABESKRIVNING_START")
     lines.append("#PRODUKT SRU")
     lines.append("#FILNAMN BLANKETTER.SRU")
@@ -267,12 +452,14 @@ def generate_k4_sru(pages, personal_details, destination_folder):
         f.write("\n".join(lines))
 
 
-def generate_k4_pdf(pages, destination_folder):
+def generate_k4_pdf(pages: List[K4Page], destination_folder: str) -> None:
+    """Generate K4 PDF files for printing."""
     for page in pages:
         page.generate_pdf(destination_folder)
 
 
-def output_totals(tax_events, stock_tax_events = None):
+def output_totals(tax_events: List[TaxEvent], stock_tax_events: Optional[List[TaxEvent]] = None) -> None:
+    """Print summary of tax totals."""
     crypto_tax_events = [x for x in tax_events if not is_fiat(x.name)]
     fiat_tax_events = [x for x in tax_events if is_fiat(x.name)]
 
@@ -293,3 +480,226 @@ def output_totals(tax_events, stock_tax_events = None):
     print(f"  Summed profit (box 7.5): {crypto_total_profit}")
     print(f"  Summed loss (box 8.4): {crypto_total_loss}")
     print(f"  Section D Tax: {round(0.3*(crypto_total_profit - 0.7*crypto_total_loss))}")
+
+
+def generate_calculation_report(
+    trade_events: List['TradeEvent'],
+    destination_folder: str,
+    per_coin: bool = True
+) -> None:
+    """Generate CSV report showing how tax was calculated trade by trade.
+
+    Creates a detailed calculation report showing cost basis changes for each
+    trade, useful for understanding and verifying the tax calculation.
+
+    Args:
+        trade_events: List of TradeEvent objects from compute_tax.
+        destination_folder: Directory to write report files.
+        per_coin: If True, also generate per-coin reports.
+    """
+    if not trade_events:
+        return
+
+    def write_csv(f: Any, events: List['TradeEvent']) -> None:
+        # Header row (Swedish)
+        f.write("Datum\tSymbol\tTyp\tHändelse\tAntal\tPris\tTotalt antal\t"
+                "Totalt omkostnadsbelopp\tGenomsnittligt omkostnadsbelopp\tVinst\tFörlust\n")
+        for t in events:
+            if t.amount > 0:
+                # Buy event
+                total_cost = t.cost_basis_after * t.total_amount_after
+                f.write(f"{t.date}\t{t.name}\t{t.trade_type}\tKöp\t{t.amount}\t{t.price}\t"
+                        f"{t.total_amount_after}\t{total_cost}\t{t.cost_basis_after}\t\t\n")
+            elif t.amount < 0:
+                # Sell event
+                total_cost = t.cost_basis_after * t.total_amount_after
+                profit = ''
+                loss = ''
+                if t.tax_event:
+                    if t.tax_event.profit() > 0:
+                        profit = t.tax_event.profit()
+                    else:
+                        loss = -t.tax_event.profit()
+                f.write(f"{t.date}\t{t.name}\t{t.trade_type}\tSälj\t{t.amount}\t{t.price}\t"
+                        f"{t.total_amount_after}\t{total_cost}\t{t.cost_basis_after}\t{profit}\t{loss}\n")
+
+    if not os.path.exists(destination_folder):
+        os.makedirs(destination_folder)
+
+    # Write main report with all trades
+    with open(os.path.join(destination_folder, "calculation_report.csv"), "w", encoding="utf-8") as f:
+        write_csv(f, trade_events)
+
+    # Write individual reports per coin
+    if per_coin:
+        symbols = sorted(set(t.name for t in trade_events))
+        for symbol in symbols:
+            coin_events = [t for t in trade_events if t.name == symbol]
+            # Sanitize symbol for filename (remove characters that might cause issues)
+            safe_symbol = "".join(c if c.isalnum() else "_" for c in symbol)
+            with open(os.path.join(destination_folder, f"calculation_report_{safe_symbol}.csv"), "w", encoding="utf-8") as f:
+                write_csv(f, coin_events)
+
+
+# Trade types that count as taxable income (for T2 form)
+TAXABLE_INCOME_TYPES = [
+    'Mining',
+    'Staking', 
+    'Interest Income',
+    'Reward / Bonus',
+    'Income',
+]
+
+
+def generate_income_report(
+    trades: Any,
+    from_date: Any,
+    to_date: Any,
+    report_filename: str
+) -> float:
+    """Generate a report of taxable crypto income for T2 form.
+    
+    This report summarizes all income-type transactions that need to be
+    declared as hobby income (or business income) on the T2 form.
+    
+    Args:
+        trades: Trades object containing all trades.
+        from_date: Start date for reporting period.
+        to_date: End date for reporting period.
+        report_filename: Path to write the CSV report.
+    
+    Returns:
+        Total taxable income in SEK.
+    """
+    income_events: List[Dict[str, Any]] = []
+    
+    for trade in trades.trades:
+        if trade.date < from_date or trade.date > to_date:
+            continue
+        
+        if trade.type in TAXABLE_INCOME_TYPES:
+            income_events.append({
+                'date': trade.date,
+                'type': trade.type,
+                'coin': trade.buy_coin,
+                'amount': trade.buy_amount,
+                'value_sek': trade.buy_value,
+            })
+    
+    # Sort by date
+    income_events.sort(key=lambda x: x['date'])
+    
+    # Calculate totals per type
+    totals_by_type: Dict[str, float] = {}
+    for event in income_events:
+        trade_type = event['type']
+        if trade_type not in totals_by_type:
+            totals_by_type[trade_type] = 0.0
+        totals_by_type[trade_type] += event['value_sek'] or 0.0
+    
+    total_income = sum(totals_by_type.values())
+    
+    # Write CSV report
+    with open(report_filename, 'w', encoding='utf-8') as f:
+        f.write("# T2 Inkomst av hobby - Kryptovaluta\n")
+        f.write(f"# Period: {from_date.strftime('%Y-%m-%d')} - {to_date.strftime('%Y-%m-%d')}\n")
+        f.write("#\n")
+        f.write("# SAMMANFATTNING:\n")
+        for trade_type, amount in sorted(totals_by_type.items()):
+            f.write(f"# {trade_type}: {round(amount)} SEK\n")
+        f.write(f"# TOTALT: {round(total_income)} SEK\n")
+        f.write("#\n")
+        f.write("Datum,Typ,Valuta,Antal,Värde (SEK)\n")
+        
+        for event in income_events:
+            date_str = event['date'].strftime('%Y-%m-%d')
+            value = round(event['value_sek']) if event['value_sek'] else 0
+            f.write(f"{date_str},{event['type']},{event['coin']},{event['amount']},{value}\n")
+        
+        f.write(f"\n# Total taxable income: {round(total_income)} SEK\n")
+    
+    return total_income
+
+
+def generate_t2_sru_report(
+    trades: Any,
+    from_date: Any,
+    to_date: Any,
+    personal_details: PersonalDetails,
+    destination_folder: str,
+    expenses: int = 0,
+    depreciation: int = 0,
+    previous_deficit: int = 0,
+    deficit_years: Optional[List[int]] = None,
+    previous_schablonavdrag: int = 0,
+    assessed_egenavgifter: int = 0,
+    schablon_percent: float = 0.25,
+    activity_description: str = "Kryptovaluta - hobby (staking, mining m.m.)",
+    append_to_k4: bool = True
+) -> Tuple[int, int]:
+    """Generate T2 SRU file for hobby income (staking, mining, etc.).
+
+    This creates SRU-formatted output for the T2 form that can be uploaded
+    to Skatteverket's filöverföring service.
+
+    Args:
+        trades: Trades object containing all trades.
+        from_date: Start date for reporting period.
+        to_date: End date for reporting period.
+        personal_details: PersonalDetails with taxpayer info.
+        destination_folder: Directory to write SRU files.
+        expenses: Total cash expenses (kontanta utgifter) in SEK.
+        depreciation: Depreciation deduction (förslitningsavdrag) in SEK.
+        previous_deficit: Deficit from previous years to deduct (max 5 years back).
+        deficit_years: List of years (2020-2024) the deficit is from.
+        previous_schablonavdrag: Previous year's standard deduction for egenavgifter.
+        assessed_egenavgifter: Assessed egenavgifter from slutskattebesked.
+        schablon_percent: Standard deduction percentage (0.25 for born 1959+, 0.10 for older).
+        activity_description: Description for Section A (max ~50 chars).
+        append_to_k4: If True, append T2 to existing blanketter.sru (after K4).
+
+    Returns:
+        Tuple of (total_income, final_result_overskott) in SEK.
+
+    Note:
+        The SRU field codes used are based on SKV 269 documentation.
+        Test with Skatteverket's test function before production submission.
+    """
+    # Calculate total income from trades
+    total_income = 0.0
+
+    for trade in trades.trades:
+        if trade.date < from_date or trade.date > to_date:
+            continue
+
+        if trade.type in TAXABLE_INCOME_TYPES:
+            total_income += trade.buy_value or 0.0
+
+    # Round to whole kronor
+    income_sek = round(total_income)
+
+    if income_sek == 0:
+        return (0, 0)
+
+    # Create T2 data
+    t2_data = T2Data(
+        verksamhet_art=activity_description,
+        inkomster=income_sek,
+        kontanta_utgifter=expenses,
+        forslitningsavdrag=depreciation,
+        tidigare_underskott=previous_deficit,
+        underskott_years=deficit_years or [],
+        foregaende_schablonavdrag=previous_schablonavdrag,
+        paforda_egenavgifter=assessed_egenavgifter,
+        schablon_percent=schablon_percent
+    )
+
+    # Create T2 page
+    year = from_date.year
+    t2_page = T2Page(year, personal_details, 1, t2_data)
+
+    # Generate SRU
+    generate_t2_sru([t2_page], personal_details, destination_folder, append_to_k4)
+
+    return (income_sek, t2_data.d6_overskott)
+

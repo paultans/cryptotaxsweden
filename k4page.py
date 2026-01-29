@@ -1,16 +1,35 @@
+"""K4 form generation for Swedish tax reporting.
+
+This module handles the generation of K4 forms in both SRU (digital)
+and PDF format for Skatteverket.
+"""
+
 from datetime import datetime
+from typing import List, Optional, Any
+import glob
 import os
 
 
 class K4Section:
-    def __init__(self, lines, sums):
+    """Represents a section of the K4 form (A, C, or D)."""
+    
+    def __init__(self, lines: List[List[Optional[str]]], sums: List[Optional[str]]) -> None:
         self.lines = lines
         self.sums = sums
 
 
 class K4Page:
-    def __init__(self, year, personal_details, page_number,
-                 section_a, section_c, section_d):
+    """Represents a single K4 form page."""
+    
+    def __init__(
+        self, 
+        year: int, 
+        personal_details: Any,  # PersonalDetails from taxdata
+        page_number: int,
+        section_a: Optional[K4Section], 
+        section_c: Optional[K4Section], 
+        section_d: Optional[K4Section]
+    ) -> None:
         self._year = year
         self._personal_details = personal_details
         self._page_number = page_number
@@ -18,7 +37,21 @@ class K4Page:
         self._section_c = section_c
         self._section_d = section_d
 
-    def generate_sru_lines(self):
+    def _get_template_path(self) -> str:
+        """Get the K4 template path, falling back to latest if year-specific not found."""
+        specific_template = f"docs/K4-template-{self._year}.pdf"
+        if os.path.exists(specific_template):
+            return specific_template
+        
+        # Fall back to most recent template available
+        templates = sorted(glob.glob("docs/K4-template-*.pdf"), reverse=True)
+        if templates:
+            return templates[0]
+        
+        raise Exception("No K4 template PDFs available in docs/ folder")
+
+    def generate_sru_lines(self) -> List[str]:
+        """Generate SRU format lines for this page."""
         k4_page_number_field = 7014
 
         blankettkod = f"K4-{self._year}P4"
@@ -26,14 +59,14 @@ class K4Page:
         generated_date = now.strftime("%Y%m%d")
         generated_time = now.strftime("%H%M%S")
 
-        lines = []
+        lines: List[str] = []
         lines.append(f"#BLANKETT {blankettkod}")
         lines.append(
             f"#IDENTITET {self._personal_details.personnummer.replace('-', '')} {generated_date} {generated_time}")
         lines.append(f"#NAMN {self._personal_details.namn}")
         lines.append(f"#UPPGIFT {k4_page_number_field} {self._page_number}")
 
-        def generate_section(section, k4_base_field_code, k4_field_code_line_offset, k4_sum_field_codes):
+        def generate_section(section: K4Section, k4_base_field_code: int, k4_field_code_line_offset: int, k4_sum_field_codes: List[int]) -> None:
             for (line_index, fields) in enumerate(section.lines):
                 for (field_index, field) in enumerate(fields):
                     if field:
@@ -55,7 +88,8 @@ class K4Page:
 
         return lines
 
-    def generate_pdf(self, destination_folder):
+    def generate_pdf(self, destination_folder: str) -> None:
+        """Generate PDF output by overlaying data on the K4 template."""
         import io
         import pdfrw
         from reportlab.pdfgen import canvas
@@ -65,7 +99,7 @@ class K4Page:
         field_yoffset = 24
         sumfield_addition_yoffset = 10
 
-        def generate_section(pdf, section, maxlines, ystart):
+        def generate_section(pdf: Any, section: K4Section, maxlines: int, ystart: int) -> None:
             for (y, fields) in enumerate(section.lines):
                 for (x, field) in enumerate(fields):
                     ys = ystart - field_yoffset * y
@@ -83,7 +117,7 @@ class K4Page:
                         text=field[:field_char_widths[x]]
                     )
 
-        def generate_page_1_overlay():
+        def generate_page_1_overlay() -> Any:
             data = io.BytesIO()
             pdf = canvas.Canvas(data)
             pdf.setFont("Helvetica", 10)
@@ -98,7 +132,7 @@ class K4Page:
             data.seek(0)
             return data
 
-        def generate_page_2_overlay():
+        def generate_page_2_overlay() -> Any:
             data = io.BytesIO()
             pdf = canvas.Canvas(data)
             pdf.setFont("Helvetica", 10)
@@ -111,7 +145,7 @@ class K4Page:
             data.seek(0)
             return data
 
-        def merge(overlay_canvases, template_path):
+        def merge(overlay_canvases: List[Any], template_path: str) -> Any:
             template_pdf = pdfrw.PdfReader(template_path)
             overlay_pdfs = [pdfrw.PdfReader(x) for x in overlay_canvases]
             for page, data in zip(template_pdf.pages, overlay_pdfs):
@@ -122,7 +156,7 @@ class K4Page:
             form.seek(0)
             return form
 
-        def save(form, filename):
+        def save(form: Any, filename: str) -> None:
             with open(filename, 'wb') as f:
                 f.write(form.read())
 
@@ -130,8 +164,6 @@ class K4Page:
             os.makedirs(destination_folder)
         pagestr = "%02d" % self._page_number
 
-        template_filename = f"docs/K4-template-{self._year}.pdf"
-        if not os.path.exists(template_filename):
-            raise Exception(f"K4 template pdf for {self._year} not available at {template_filename}")
+        template_filename = self._get_template_path()
         form = merge([generate_page_1_overlay(), generate_page_2_overlay()], template_path=template_filename)
         save(form, filename=f"{destination_folder}/k4_no{pagestr}.pdf")

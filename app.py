@@ -1,0 +1,558 @@
+"""Streamlit web UI for Swedish Crypto Tax Reporter.
+
+Run with: streamlit run app.py
+"""
+
+import streamlit as st
+import pandas as pd
+import datetime
+import os
+import sys
+import io
+from typing import Optional
+
+# Add current directory to path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from taxdata import PersonalDetails, Trades, TaxEvent
+import tax
+from validation import validate_trades, ValidationWarning
+from transfer_matching import find_unmatched_transfers
+
+
+st.set_page_config(
+    page_title="Swedish Crypto Tax Reporter",
+    page_icon="💰",
+    layout="wide"
+)
+
+st.title("🇸🇪 Swedish Crypto Tax Reporter")
+st.markdown("Generate K4 forms for Skatteverket from your CoinTracking data")
+
+# Sidebar for settings
+st.sidebar.header("⚙️ Settings")
+
+# Year selection
+current_year = datetime.datetime.now().year
+year = st.sidebar.selectbox(
+    "Tax Year",
+    options=list(range(current_year, 2014, -1)),
+    index=0
+)
+
+# File upload
+st.sidebar.header("📁 Data Files")
+trades_file = st.sidebar.file_uploader("Trades CSV (from CoinTracking)", type=['csv'])
+
+# Options
+st.sidebar.header("📋 Options")
+use_usd = st.sidebar.checkbox("CoinTracking prices in USD", value=False)
+simplified_k4 = st.sidebar.checkbox("Simplified K4 (aggregate per coin)", value=True)
+generate_income_report = st.sidebar.checkbox("Generate T2 Income Report (CSV)", value=True)
+generate_t2_sru = st.sidebar.checkbox("Generate T2 SRU (for upload)", value=False,
+                                       help="Generate SRU file for T2 hobby income form")
+generate_calc_report = st.sidebar.checkbox("Generate Calculation Report", value=False,
+                                           help="Detailed CSV showing cost basis changes per trade")
+show_holdings = st.sidebar.checkbox("Show Holdings Summary", value=True)
+
+# Advanced options
+with st.sidebar.expander("Advanced Options"):
+    max_overdraft = st.number_input("Max Overdraft", value=0.00000001, format="%.8f")
+    output_format = st.selectbox("Output Format", ["SRU", "PDF"])
+    generate_rounding_report = st.checkbox("Generate Rounding Report", value=True)
+    rounding_threshold = st.slider("Rounding Threshold %", min_value=1, max_value=10, value=1)
+
+# Main content area
+if trades_file is None:
+    st.info("👆 Upload your trades CSV file from CoinTracking to get started")
+    
+    st.markdown("""
+    ### How to export from CoinTracking:
+    1. Go to [CoinTracking.info](https://cointracking.info)
+    2. Navigate to **Enter Coins** → **Trade Table**
+    3. Click **Export** and choose **CSV**
+    4. Upload the file here
+    
+    ### Supported Trade Types:
+    - Trade, Mining, Gift/Tip, Spend, Airdrop
+    - Staking, Interest Income, Reward/Bonus, Income
+    """)
+else:
+    # Save uploaded file temporarily
+    trades_path = "data/trades_upload.csv"
+    with open(trades_path, "wb") as f:
+        f.write(trades_file.getvalue())
+    
+    # Load trades
+    try:
+        trades = Trades.read_from(trades_path, use_usd)
+        st.success(f"✅ Loaded {len(trades.trades)} trades")
+    except Exception as e:
+        import traceback
+        st.error(f"❌ Error loading trades: {e}")
+        st.code(traceback.format_exc())
+        st.stop()
+    
+    # Tabs for different views
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 Validation", "🔄 Transfers", "📄 Generate Report", "📈 Holdings", "💰 Profit/Loss", "📋 T2 Income"])
+    
+    with tab1:
+        st.header("Trade Data Validation")
+        
+        warnings = validate_trades(trades, year)
+        
+        if not warnings:
+            st.success("✅ No validation issues found!")
+        else:
+            errors = [w for w in warnings if w.level == 'error']
+            warns = [w for w in warnings if w.level == 'warning']
+            infos = [w for w in warnings if w.level == 'info']
+            
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Errors", len(errors), delta=None if len(errors) == 0 else "Fix required")
+            col2.metric("Warnings", len(warns))
+            col3.metric("Info", len(infos))
+            
+            if errors:
+                st.error("### ❌ Errors (must fix)")
+                for w in errors:
+                    st.markdown(f"- Line {w.lineno}: {w.message}")
+            
+            if warns:
+                st.warning("### ⚠️ Warnings")
+                for w in warns:
+                    st.markdown(f"- Line {w.lineno}: {w.message}")
+            
+            if infos:
+                st.info("### ℹ️ Information")
+                for w in infos:
+                    st.markdown(f"- {w.message}")
+    
+    with tab2:
+        st.header("Withdrawal/Deposit Matching")
+        
+        unmatched, stats = find_unmatched_transfers(trades)
+        
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Withdrawals", stats['total_withdrawals'])
+        col2.metric("Total Deposits", stats['total_deposits'])
+        col3.metric("Matched Pairs", stats['matched_pairs'])
+        
+        if unmatched:
+            st.warning(f"Found {len(unmatched)} unmatched transfers")
+            
+            # Group by coin
+            df_data = []
+            for u in unmatched:
+                df_data.append({
+                    'Type': u.transfer_type.upper(),
+                    'Coin': u.coin,
+                    'Amount': u.amount,
+                    'Date': u.date.strftime('%Y-%m-%d'),
+                    'Line': u.lineno
+                })
+            
+            st.dataframe(pd.DataFrame(df_data), use_container_width=True)
+        else:
+            st.success("✅ All transfers matched!")
+    
+    with tab3:
+        st.header("Generate Report")
+        
+        # Show validation status but don't block
+        errors = [w for w in validate_trades(trades, year) if w.level == 'error']
+        
+        if errors:
+            st.warning(f"⚠️ {len(errors)} validation warnings found (see Validation tab). You can still generate the report - the tool handles small overdrafts automatically.")
+        
+        # Personal details - always show
+        st.subheader("Personal Details")
+        
+        col1, col2 = st.columns(2)
+        name = col1.text_input("Name", value="")
+        personnummer = col2.text_input("Personnummer", value="", placeholder="YYYYMMDD-XXXX")
+        
+        col3, col4 = st.columns(2)
+        postnummer = col3.text_input("Postnummer", value="")
+        postort = col4.text_input("Postort", value="")
+        
+        if st.button("🚀 Generate Report", type="primary"):
+            if not all([name, personnummer, postnummer, postort]):
+                st.error("Please fill in all personal details")
+            else:
+                with st.spinner("Generating report..."):
+                    # Create personal details
+                    personal = PersonalDetails(name, personnummer, postnummer, postort)
+                    
+                    # Compute tax
+                    from_date = datetime.datetime(year=year, month=1, day=1)
+                    to_date = datetime.datetime(year=year, month=12, day=31, hour=23, minute=59)
+                    
+                    tax_events, trade_events = tax.compute_tax(
+                        trades, from_date, to_date, max_overdraft,
+                        exclude_groups=[],
+                        track_trade_events=generate_calc_report
+                    )
+
+                    if tax_events is None:
+                        st.error("Error computing tax events")
+                    else:
+                        if simplified_k4:
+                            tax_events = tax.aggregate_per_coin(tax_events)
+                        
+                        # Prepare output directory
+                        output_dir = "out/streamlit"
+                        os.makedirs(output_dir, exist_ok=True)
+                        
+                        # Convert to integers for SRU and generate rounding report
+                        if output_format == "SRU":
+                            if generate_rounding_report:
+                                threshold = rounding_threshold / 100.0
+                                rounding_file = f"{output_dir}/rounding_report.txt"
+                                tax.rounding_report(tax_events, threshold, rounding_file)
+                            display_events = tax.convert_to_integer_amounts(tax_events.copy())
+                        else:
+                            display_events = tax_events
+                        
+                        display_events = tax.convert_sek_to_integer_amounts(display_events)
+                        
+                        # Generate pages
+                        pages = tax.generate_k4_pages(year, personal, display_events)
+                        
+                        if output_format == "SRU":
+                            tax.generate_k4_sru(pages, personal, output_dir)
+                            
+                            # Read generated files
+                            with open(f"{output_dir}/info.sru", "r", encoding="iso-8859-1") as f:
+                                info_sru = f.read()
+                            with open(f"{output_dir}/blanketter.sru", "r", encoding="iso-8859-1") as f:
+                                blanketter_sru = f.read()
+                            
+                            st.success("✅ SRU files generated!")
+                            
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.download_button(
+                                    "📥 Download info.sru",
+                                    info_sru,
+                                    file_name="info.sru",
+                                    mime="text/plain"
+                                )
+                            with col2:
+                                st.download_button(
+                                    "📥 Download blanketter.sru",
+                                    blanketter_sru,
+                                    file_name="blanketter.sru",
+                                    mime="text/plain"
+                                )
+                            # Rounding report download
+                            if generate_rounding_report:
+                                rounding_file = f"{output_dir}/rounding_report.txt"
+                                if os.path.exists(rounding_file):
+                                    with open(rounding_file, "r") as f:
+                                        rounding_text = f.read()
+                                    with col3:
+                                        st.download_button(
+                                            "📥 Rounding Report",
+                                            rounding_text,
+                                            file_name="rounding_report.txt",
+                                            mime="text/plain"
+                                        )
+                        else:
+                            tax.generate_k4_pdf(pages, output_dir)
+                            st.success("✅ PDF files generated in out/streamlit/")
+
+                        # Generate T2 Income Report if requested
+                        if generate_income_report:
+                            income_file = f"{output_dir}/income_report.csv"
+                            total_income = tax.generate_income_report(
+                                trades, from_date, to_date, income_file
+                            )
+                            if total_income > 0:
+                                st.info(f"💰 Total taxable crypto income: {round(total_income):,} SEK (see T2 report)")
+                                with open(income_file, "r", encoding="utf-8") as f:
+                                    income_text = f.read()
+                                st.download_button(
+                                    "📥 Download T2 Income Report (CSV)",
+                                    income_text,
+                                    file_name="income_report.csv",
+                                    mime="text/csv"
+                                )
+
+                        # Generate T2 SRU if requested
+                        if generate_t2_sru:
+                            t2_income, t2_result = tax.generate_t2_sru_report(
+                                trades, from_date, to_date, personal, output_dir,
+                                append_to_k4=True
+                            )
+                            if t2_income > 0:
+                                st.success(f"✅ T2 SRU generated! Income: {t2_income:,} SEK, Result (to INK1): {t2_result:,} SEK")
+                                # Re-read the updated blanketter.sru
+                                with open(f"{output_dir}/blanketter.sru", "r", encoding="iso-8859-1") as f:
+                                    blanketter_sru = f.read()
+                                st.download_button(
+                                    "📥 Download blanketter.sru (K4+T2)",
+                                    blanketter_sru,
+                                    file_name="blanketter.sru",
+                                    mime="text/plain",
+                                    key="blanketter_with_t2"
+                                )
+
+                        # Generate calculation report if requested
+                        if generate_calc_report and trade_events:
+                            tax.generate_calculation_report(trade_events, output_dir)
+                            calc_file = f"{output_dir}/calculation_report.csv"
+                            if os.path.exists(calc_file):
+                                st.success("✅ Calculation report generated!")
+                                with open(calc_file, "r", encoding="utf-8") as f:
+                                    calc_report = f.read()
+                                st.download_button(
+                                    "📥 Download Calculation Report (CSV)",
+                                    calc_report,
+                                    file_name="calculation_report.csv",
+                                    mime="text/csv"
+                                )
+
+                                # Show info about per-coin reports
+                                st.info("Per-coin calculation reports also generated in output folder")
+
+                        # Show totals
+                        st.subheader("Tax Summary")
+                        crypto_events = [x for x in display_events if not tax.is_fiat(x.name)]
+                        
+                        profit = sum([x.profit() if x.profit() > 0 else 0 for x in crypto_events])
+                        loss = sum([-x.profit() if x.profit() < 0 else 0 for x in crypto_events])
+                        
+                        col1, col2, col3 = st.columns(3)
+                        col1.metric("Total Profit", f"{profit:,.0f} SEK")
+                        col2.metric("Total Loss", f"{loss:,.0f} SEK")
+                        col3.metric("Estimated Tax", f"{round(0.3*(profit - 0.7*loss)):,.0f} SEK")
+    
+    with tab4:
+        st.header("Holdings Summary")
+        
+        from_date = datetime.datetime(year=year, month=1, day=1)
+        to_date = datetime.datetime(year=year, month=12, day=31, hour=23, minute=59)
+        
+        # We need to recompute to get coin balances
+        # This is a simplified version - in production we'd cache this
+        coins_data = []
+        
+        # Simulate compute to get holdings
+        coins = {}
+        for trade in trades.trades:
+            if trade.date > to_date:
+                break
+            
+            if trade.buy_coin and trade.buy_coin not in ['SEK', 'EUR', 'USD']:
+                if trade.buy_coin not in coins:
+                    coins[trade.buy_coin] = {'amount': 0.0, 'cost_basis': 0.0}
+                old_amount = coins[trade.buy_coin]['amount']
+                new_amount = old_amount + (trade.buy_amount or 0)
+                if new_amount > 0:
+                    old_cost = coins[trade.buy_coin]['cost_basis'] * old_amount
+                    new_cost = (trade.buy_value or 0)
+                    coins[trade.buy_coin]['cost_basis'] = (old_cost + new_cost) / new_amount
+                    coins[trade.buy_coin]['amount'] = new_amount
+            
+            if trade.sell_coin and trade.sell_coin not in ['SEK', 'EUR', 'USD']:
+                if trade.sell_coin in coins:
+                    coins[trade.sell_coin]['amount'] -= (trade.sell_amount or 0)
+                    if coins[trade.sell_coin]['amount'] < 0:
+                        coins[trade.sell_coin]['amount'] = 0
+        
+        # Build display data
+        for symbol, data in sorted(coins.items()):
+            if data['amount'] > 0.0001:
+                coins_data.append({
+                    'Coin': symbol,
+                    'Amount': data['amount'],
+                    'Cost Basis (SEK/unit)': data['cost_basis'],
+                    'Total Cost (SEK)': data['amount'] * data['cost_basis']
+                })
+        
+        if coins_data:
+            df = pd.DataFrame(coins_data)
+            st.dataframe(df, use_container_width=True)
+            
+            total_cost = sum(d['Total Cost (SEK)'] for d in coins_data)
+            st.metric("Total Portfolio Cost Basis", f"{total_cost:,.0f} SEK")
+        else:
+            st.info("No holdings found for this year")
+
+    with tab5:
+        st.header("Profit/Loss Breakdown by Coin")
+        st.markdown("Sanity check your tax calculation by reviewing profits and losses per coin.")
+
+        from_date = datetime.datetime(year=year, month=1, day=1)
+        to_date = datetime.datetime(year=year, month=12, day=31, hour=23, minute=59)
+
+        # Compute tax events
+        tax_events, _ = tax.compute_tax(
+            trades, from_date, to_date, max_overdraft,
+            exclude_groups=[]
+        )
+
+        if tax_events is None:
+            st.error("Error computing tax events. Check the Validation tab for issues.")
+        else:
+            # Aggregate by coin
+            coin_summary = {}
+            for te in tax_events:
+                if te.name not in coin_summary:
+                    coin_summary[te.name] = {'profit': 0.0, 'loss': 0.0, 'income': 0.0, 'cost': 0.0, 'amount': 0.0}
+                p = te.profit()
+                if p > 0:
+                    coin_summary[te.name]['profit'] += p
+                else:
+                    coin_summary[te.name]['loss'] += abs(p)
+                coin_summary[te.name]['income'] += te.income
+                coin_summary[te.name]['cost'] += te.cost
+                coin_summary[te.name]['amount'] += te.amount
+
+            # Calculate totals
+            total_profit = sum(d['profit'] for d in coin_summary.values())
+            total_loss = sum(d['loss'] for d in coin_summary.values())
+            net = total_profit - total_loss
+
+            # Summary metrics
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Total Profit", f"{total_profit:,.0f} SEK")
+            col2.metric("Total Loss", f"{total_loss:,.0f} SEK")
+            col3.metric("Net", f"{net:,.0f} SEK", delta=f"{net:,.0f}")
+
+            # Top Profits
+            st.subheader("Top Profits")
+            profit_data = []
+            for coin, data in sorted(coin_summary.items(), key=lambda x: -x[1]['profit']):
+                if data['profit'] > 0:
+                    profit_data.append({
+                        'Coin': coin,
+                        'Profit (SEK)': round(data['profit']),
+                        'Income (SEK)': round(data['income']),
+                        'Cost (SEK)': round(data['cost']),
+                        'Amount': round(data['amount'], 4)
+                    })
+
+            if profit_data:
+                st.dataframe(pd.DataFrame(profit_data[:15]), use_container_width=True)
+            else:
+                st.info("No profits recorded")
+
+            # Top Losses
+            st.subheader("Top Losses")
+            loss_data = []
+            for coin, data in sorted(coin_summary.items(), key=lambda x: -x[1]['loss']):
+                if data['loss'] > 0:
+                    loss_data.append({
+                        'Coin': coin,
+                        'Loss (SEK)': round(data['loss']),
+                        'Income (SEK)': round(data['income']),
+                        'Cost (SEK)': round(data['cost']),
+                        'Amount': round(data['amount'], 4)
+                    })
+
+            if loss_data:
+                st.dataframe(pd.DataFrame(loss_data[:15]), use_container_width=True)
+            else:
+                st.info("No losses recorded")
+
+            # Full breakdown (expandable)
+            with st.expander("View All Coins"):
+                all_data = []
+                for coin, data in sorted(coin_summary.items()):
+                    all_data.append({
+                        'Coin': coin,
+                        'Profit (SEK)': round(data['profit']),
+                        'Loss (SEK)': round(data['loss']),
+                        'Net (SEK)': round(data['profit'] - data['loss']),
+                        'Income (SEK)': round(data['income']),
+                        'Cost (SEK)': round(data['cost'])
+                    })
+                st.dataframe(pd.DataFrame(all_data), use_container_width=True)
+
+    with tab6:
+        st.header("T2 Hobby Income (Staking, Mining, etc.)")
+        st.markdown("""
+        This tab shows your taxable crypto income that should be reported on **T2 form**
+        (Inkomst av tjänst - hobby). This includes:
+        - Mining rewards
+        - Staking rewards
+        - Interest income
+        - Other crypto rewards/bonuses
+        """)
+
+        from_date = datetime.datetime(year=year, month=1, day=1)
+        to_date = datetime.datetime(year=year, month=12, day=31, hour=23, minute=59)
+
+        # Calculate income by type
+        income_by_type = {}
+        income_events = []
+
+        for trade in trades.trades:
+            if trade.date < from_date or trade.date > to_date:
+                continue
+            if trade.type in tax.TAXABLE_INCOME_TYPES:
+                if trade.type not in income_by_type:
+                    income_by_type[trade.type] = 0.0
+                income_by_type[trade.type] += trade.buy_value or 0.0
+                income_events.append({
+                    'Date': trade.date.strftime('%Y-%m-%d'),
+                    'Type': trade.type,
+                    'Coin': trade.buy_coin,
+                    'Amount': trade.buy_amount,
+                    'Value (SEK)': round(trade.buy_value or 0)
+                })
+
+        total_income = sum(income_by_type.values())
+
+        if total_income > 0:
+            # Summary metrics
+            st.subheader("Income Summary")
+            cols = st.columns(min(len(income_by_type) + 1, 4))
+            cols[0].metric("Total Income", f"{round(total_income):,} SEK")
+            for i, (income_type, amount) in enumerate(sorted(income_by_type.items())):
+                if i + 1 < len(cols):
+                    cols[i + 1].metric(income_type, f"{round(amount):,} SEK")
+
+            # Detailed breakdown
+            st.subheader("Income Events")
+            if income_events:
+                df = pd.DataFrame(income_events)
+                st.dataframe(df, use_container_width=True)
+
+            # T2 calculation preview
+            st.subheader("T2 Form Preview")
+            st.markdown("**Section B - Årets inkomster och utgifter**")
+
+            # Simple calculation (no expenses for crypto hobby typically)
+            b1_income = round(total_income)
+            b4_surplus = b1_income  # Assuming no expenses
+
+            col1, col2 = st.columns(2)
+            col1.metric("B.1 Inkomster", f"{b1_income:,} SEK")
+            col2.metric("B.4 Överskott", f"{b4_surplus:,} SEK")
+
+            st.markdown("**Section D - Egenavgifter**")
+            # Default 25% schablonavdrag for born 1959 or later
+            d5_schablon = round(b4_surplus * 0.25)
+            d6_result = b4_surplus - d5_schablon
+
+            col1, col2, col3 = st.columns(3)
+            col1.metric("D.1 Överskott", f"{b4_surplus:,} SEK")
+            col2.metric("D.5 Schablonavdrag (25%)", f"{d5_schablon:,} SEK")
+            col3.metric("D.6 Resultat → INK1 p.1.6", f"{d6_result:,} SEK")
+
+            st.info("""
+            **Note:** The D.6 result is what you report on your main tax form (INK1) at point 1.6.
+            You'll also pay egenavgifter on this income (around 28.97% for most people).
+
+            To generate the T2 SRU file for upload to Skatteverket, enable "Generate T2 SRU"
+            in the sidebar and click "Generate Report" on the Generate Report tab.
+            """)
+        else:
+            st.info("No taxable crypto income found for this year.")
+
+# Footer
+st.sidebar.markdown("---")
+st.sidebar.markdown("Made with ❤️ for Swedish crypto tax reporting")
