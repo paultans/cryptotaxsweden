@@ -279,9 +279,7 @@ def generate_t2_sru(
             existing = f.read()
 
         # Remove #FIL_SLUT and trailing newlines
-        existing = existing.rstrip()
-        if existing.endswith("#FIL_SLUT"):
-            existing = existing[:-9].rstrip()
+        existing = existing.replace("#FIL_SLUT", "").rstrip()
 
         # Combine and write
         all_lines = existing + "\n" + "\n".join(t2_lines) + "\n#FIL_SLUT\n"

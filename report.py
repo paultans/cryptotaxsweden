@@ -1,6 +1,7 @@
 import argparse
 import datetime
 import os
+import shutil
 import sys
 from enum import Enum
 
@@ -43,6 +44,7 @@ parser.add_argument('--save-state', help='Save coin state at end of year for use
 parser.add_argument('--load-state', help='Load coin state from file (e.g., out/coin_state_2024.json)', type=str)
 parser.add_argument('--holdings', help='Show current holdings summary after processing', action='store_true')
 parser.add_argument('--calculation-report', help='Generate detailed calculation report showing cost basis changes per trade', action='store_true')
+parser.add_argument('--archive', help='Copy all output files to an archive folder named by tax year (e.g., out/2025/)', action='store_true')
 
 opts = parser.parse_args()
 
@@ -134,9 +136,9 @@ tax.output_totals(tax_events, stock_tax_events=stock_tax_events)
 if opts.income_report:
     income_total = tax.generate_income_report(
         trades, from_date, to_date,
-        os.path.join(opts.out, "income_report_t2.csv")
+        os.path.join(opts.out, "income_report.csv")
     )
-    print(f"\nT2 Income Report: {os.path.join(opts.out, 'income_report_t2.csv')}")
+    print(f"\nT2 Income Report: {os.path.join(opts.out, 'income_report.csv')}")
     print(f"  Total taxable crypto income: {round(income_total)} SEK")
 
 # Generate T2 SRU file if requested
@@ -154,4 +156,31 @@ if opts.t2_sru:
         print(f"  Note: Test with Skatteverket's test function before production use")
     else:
         print(f"\nNo taxable crypto income found - T2 SRU not generated")
+
+# Archive output files to year folder if requested
+if opts.archive:
+    archive_dir = os.path.join(opts.out, str(opts.year))
+    if os.path.exists(archive_dir):
+        print(f"\nArchive folder {archive_dir} already exists. Overwrite? [y/N] ", end="")
+        if input().strip().lower() != 'y':
+            print("Archive skipped.")
+            sys.exit(0)
+        shutil.rmtree(archive_dir)
+    os.makedirs(archive_dir)
+
+    # Copy all files (not subdirectories) from out/ to out/YEAR/
+    count = 0
+    for filename in os.listdir(opts.out):
+        filepath = os.path.join(opts.out, filename)
+        if os.path.isfile(filepath):
+            shutil.copy2(filepath, archive_dir)
+            count += 1
+
+    # Also copy the input trades.csv and personal_details.json for reproducibility
+    for data_file in [opts.trades, "data/personal_details.json"]:
+        if os.path.exists(data_file):
+            shutil.copy2(data_file, archive_dir)
+            count += 1
+
+    print(f"\nArchived {count} files to {archive_dir}/")
 

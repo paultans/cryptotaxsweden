@@ -9,6 +9,7 @@ import datetime
 import os
 import sys
 import io
+import re
 from typing import Optional
 
 # Add current directory to path
@@ -61,6 +62,12 @@ with st.sidebar.expander("Advanced Options"):
     output_format = st.selectbox("Output Format", ["SRU", "PDF"])
     generate_rounding_report = st.checkbox("Generate Rounding Report", value=True)
     rounding_threshold = st.slider("Rounding Threshold %", min_value=1, max_value=10, value=1)
+    t2_schablon_percent = st.selectbox(
+        "T2 Schablonavdrag %",
+        options=[25, 10],
+        index=0,
+        help="25% for born 1959 or later, 10% for born before 1959"
+    )
 
 # Main content area
 if trades_file is None:
@@ -179,6 +186,8 @@ else:
         if st.button("🚀 Generate Report", type="primary"):
             if not all([name, personnummer, postnummer, postort]):
                 st.error("Please fill in all personal details")
+            elif not re.match(r'^\d{8}-\d{4}$', personnummer):
+                st.error("Personnummer must be in format YYYYMMDD-XXXX")
             else:
                 with st.spinner("Generating report..."):
                     # Create personal details
@@ -283,6 +292,7 @@ else:
                         if generate_t2_sru:
                             t2_income, t2_result = tax.generate_t2_sru_report(
                                 trades, from_date, to_date, personal, output_dir,
+                                schablon_percent=t2_schablon_percent / 100.0,
                                 append_to_k4=True
                             )
                             if t2_income > 0:
@@ -534,13 +544,12 @@ else:
             col2.metric("B.4 Överskott", f"{b4_surplus:,} SEK")
 
             st.markdown("**Section D - Egenavgifter**")
-            # Default 25% schablonavdrag for born 1959 or later
-            d5_schablon = round(b4_surplus * 0.25)
+            d5_schablon = round(b4_surplus * (t2_schablon_percent / 100.0))
             d6_result = b4_surplus - d5_schablon
 
             col1, col2, col3 = st.columns(3)
             col1.metric("D.1 Överskott", f"{b4_surplus:,} SEK")
-            col2.metric("D.5 Schablonavdrag (25%)", f"{d5_schablon:,} SEK")
+            col2.metric(f"D.5 Schablonavdrag ({t2_schablon_percent}%)", f"{d5_schablon:,} SEK")
             col3.metric("D.6 Resultat → INK1 p.1.6", f"{d6_result:,} SEK")
 
             st.info("""

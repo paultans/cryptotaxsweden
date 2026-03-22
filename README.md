@@ -223,6 +223,8 @@ optional arguments:
   --save-state          Save coin state at end of year for use in next year
   --load-state FILE     Load coin state from file (e.g., out/coin_state_2024.json)
   --update-rates        Update USD/SEK rates from Riksbanken before processing
+  --archive             Copy all output files to a year folder (e.g., out/2025/)
+                        for archival, including input data for reproducibility
 ```
 
 ### Example
@@ -321,6 +323,19 @@ python report.py 2024 --update-rates --simplified-k4
 # Update rates only (no report)
 python report.py --update-rates
 ```
+
+#### Archive output to a year folder
+
+After generating a report you're happy with, archive everything to a year folder
+for safekeeping. This copies all output files plus your input data (`trades.csv`,
+`personal_details.json`) so you can always reproduce the report later.
+
+```
+python report.py 2025 --simplified-k4 --income-report --rounding-report --archive
+```
+
+This creates `out/2025/` containing all generated files and input data.
+If the folder already exists, you'll be prompted before overwriting.
 
 #### Merging the generated pdf files
 
